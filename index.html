@@ -1,0 +1,954 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rust::concurrency — шпаргалка</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0d0f14; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0d0f14; }
+    ::-webkit-scrollbar-thumb { background: #2a3040; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- React 18 + Babel standalone -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel" data-presets="react">
+const data = {
+  categories: [
+    {
+      id: "ownership",
+      label: "Shared Ownership",
+      color: "#e8793a",
+      items: [
+        {
+          name: "Rc<T>",
+          subtitle: "Reference Counted",
+          thread_safe: false,
+          short: "Несколько владельцев, один поток",
+          etymology: `RC = Reference Counted — «подсчёт ссылок».
+
+Название буквально описывает механизм: внутри хранится счётчик (usize), который растёт при каждом clone() и уменьшается при каждом drop(). Когда счётчик достигает нуля — данные освобождаются.
+
+Это классический алгоритм управления памятью, известный с 1960-х. В Python это основной механизм GC. В С++ — std::shared_ptr. В Rust — Rc<T>.
+
+Почему не «SharedPtr»? Rust предпочитает имена, раскрывающие реализацию, а не абстрактное назначение. «Reference Counted» честно говорит как это работает под капотом.`,
+          what: "Умный указатель с подсчётом ссылок. Позволяет нескольким переменным владеть одним значением.",
+          why: "Когда нужно разделить владение данными, но вы точно знаете что работаете в одном потоке.",
+          how: "Rc::new(value), Rc::clone(&rc) — увеличивает счётчик. Данные дропаются когда счётчик = 0.",
+          danger: "Не Send, не Sync — нельзя отправить в другой поток. В многопоточке → Arc. Циклические ссылки → утечка памяти (используй Weak).",
+          example: `use std::rc::Rc;
+
+let a = Rc::new(5);
+let b = Rc::clone(&a); // счётчик = 2
+println!("{}", Rc::strong_count(&a)); // 2
+drop(b); // счётчик = 1
+// drop(a) → счётчик = 0 → память освобождена`,
+          interview: [
+            "Чем Rc отличается от Arc? — Arc использует атомарные операции для счётчика, Rc — нет. Arc безопасен для потоков, Rc — нет, зато чуть быстрее.",
+            "Может ли Rc создать циклическую ссылку? — Да, и это вызовет утечку памяти. Решение: Weak<T> для обратных ссылок.",
+            "Почему Rc не Send? — Операции с счётчиком не атомарны. Если два потока одновременно клонируют/дропают Rc — data race на счётчике.",
+          ],
+        },
+        {
+          name: "Arc<T>",
+          subtitle: "Atomic Reference Counted",
+          thread_safe: true,
+          short: "Несколько владельцев, много потоков",
+          etymology: `ARC = Atomic Reference Counted.
+
+«Atomic» — ключевое слово. Атомарная операция неделима: процессор выполняет её целиком, без возможности прерывания другим потоком на полуслове.
+
+Проблема Rc в многопоточке: счётчик — это обычный usize. Если два потока одновременно делают clone() (read-modify-write в три шага), между шагами потоки могут перемешаться → счётчик неверный → double free или утечка.
+
+Arc заменяет usize на AtomicUsize. Операции fetch_add/fetch_sub — аппаратные инструкции CPU (LOCK XADD на x86), физически неразделимые.
+
+Буква A стоит первой намеренно: Arc = Rc + Atomic. Всё остальное идентично.`,
+          what: "То же что Rc, но счётчик ссылок изменяется атомарно — безопасно между потоками.",
+          why: "Нужно разделить данные между потоками. Для мутации оборачивается в Mutex или RwLock.",
+          how: "Arc::new(val), Arc::clone(&arc). Реализует Send + Sync если T: Send + Sync.",
+          danger: "Чуть медленнее Rc из-за атомарных операций. Сам по себе не даёт мутабельность — нужен Arc<Mutex<T>>.",
+          example: `use std::sync::Arc;
+use std::thread;
+
+let data = Arc::new(vec![1, 2, 3]);
+let data2 = Arc::clone(&data);
+
+let handle = thread::spawn(move || {
+    println!("{:?}", data2); // data2 moved в поток
+});
+handle.join().unwrap();
+println!("{:?}", data); // data всё ещё жива здесь`,
+          interview: [
+            "Зачем Arc если есть Rc? — Rc не Send/Sync, Arc — да. Arc чуть медленнее из-за атомарных операций на счётчике.",
+            "Arc<T> даёт мутабельность? — Нет. Только Arc<Mutex<T>> или Arc<RwLock<T>>.",
+            "Что такое Weak в Arc? — Слабые ссылки не увеличивают strong_count и не продлевают жизнь объекта. upgrade() → Option<Arc<T>>. Нужны для разрыва циклов.",
+            "Почему Arc::clone явно, а не .clone()? — Работает и .clone(). Arc::clone(&x) сигнализирует читателю: это дёшево (не deep copy), просто инкремент счётчика.",
+          ],
+        },
+        {
+          name: "Weak<T>",
+          subtitle: "Weak Reference",
+          thread_safe: true,
+          short: "Слабая ссылка — не продлевает жизнь объекта",
+          etymology: `WEAK = «слабый» в противовес «сильному» (strong) владению.
+
+Терминология из теории управления памятью: strong reference удерживает объект живым (инкрементирует strong_count), weak reference — нет (инкрементирует только weak_count).
+
+Это решение проблемы циклических ссылок, открытой при создании Lisp: если A владеет B и B владеет A через Rc/Arc — оба никогда не дропнутся. Weak разрывает цикл: B держит слабую ссылку на A, которая не мешает A умереть.
+
+Weak::upgrade() возвращает Option<Arc<T>> — Some если объект ещё жив, None если уже дропнут. Это честно: «я не уверен что он ещё существует».`,
+          what: "Не-владеющая ссылка. Не увеличивает strong_count. Получается через Arc::downgrade(&arc).",
+          why: "Разрыв циклических ссылок. Например, дерево: родитель Arc-владеет детьми, дети Weak-ссылаются на родителя.",
+          how: "Arc::downgrade(&arc) → Weak<T>. weak.upgrade() → Option<Arc<T>>. Если strong_count = 0 — upgrade вернёт None.",
+          danger: "upgrade() может вернуть None — всегда обрабатывай оба варианта.",
+          example: `use std::sync::{Arc, Weak};
+
+let strong = Arc::new(42);
+let weak: Weak<i32> = Arc::downgrade(&strong);
+
+println!("{:?}", weak.upgrade()); // Some(42)
+drop(strong); // strong_count → 0
+println!("{:?}", weak.upgrade()); // None — объект умер`,
+          interview: [
+            "Когда нужен Weak? — При создании графов, деревьев с обратными ссылками, observer-паттернах — везде где есть риск цикла.",
+            "Что будет если дропнуть все Arc но остались Weak? — Данные освобождаются (strong_count = 0). Weak::upgrade() → None. Сам аллокатор живёт пока weak_count > 0.",
+          ],
+        },
+      ],
+    },
+    {
+      id: "interior",
+      label: "Interior Mutability",
+      color: "#4a9eff",
+      items: [
+        {
+          name: "Cell<T>",
+          subtitle: "Mutable memory location",
+          thread_safe: false,
+          short: "Мутация Copy-типов без &mut",
+          etymology: `CELL = «ячейка» памяти.
+
+Метафора из биологии/химии: ячейка — изолированный контейнер, содержимое которого можно заменить целиком, не разбирая на части.
+
+Cell<T> именно так и работает: нельзя получить ссылку внутрь (&T или &mut T). Только set() — заменить целиком — и get() — скопировать целиком. Это и есть «ячейка»: непрозрачный контейнер с атомарной заменой содержимого.
+
+Именно поэтому Cell работает только с Copy-типами: get() обязан копировать значение, иначе нарушится модель владения.`,
+          what: "Позволяет менять значение через shared reference (&self). Работает только с Copy-типами.",
+          why: "Когда нужно изменять примитив через &self без overhead RefCell (нет runtime borrow-чекинга).",
+          how: "cell.get() копирует значение, cell.set(val) заменяет. Нет borrow-чекинга — нет паники. Нет ссылок внутрь.",
+          danger: "Только Copy-типы. Не Send — только для одного потока. Нельзя получить &T или &mut T.",
+          example: `use std::cell::Cell;
+
+struct Config {
+    debug: Cell<bool>,
+    calls: Cell<u32>,
+}
+
+impl Config {
+    fn inc(&self) { // &self, не &mut self!
+        self.calls.set(self.calls.get() + 1);
+    }
+}`,
+          interview: [
+            "Cell vs RefCell? — Cell для Copy-типов (только set/get, нет ссылок), RefCell для любых типов через borrow()/borrow_mut().",
+            "Почему Cell не требует unsafe? — Не даёт ссылок внутрь. Нет ссылки — нет aliasing — нет UB.",
+          ],
+        },
+        {
+          name: "RefCell<T>",
+          subtitle: "Ref + Cell",
+          thread_safe: false,
+          short: "Мутация любых типов, borrow-чекинг в рантайме",
+          etymology: `REF + CELL = RefCell.
+
+Это буквально сложение двух слов:
+• REF — reference. В отличие от Cell, RefCell позволяет получить ссылки внутрь: Ref<T> (= &T) и RefMut<T> (= &mut T).
+• CELL — та же «ячейка» interior mutability. Можно менять содержимое через &self.
+
+Смысл названия: «ячейка, которая выдаёт ссылки». Но ссылки не могут существовать по обычным правилам Rust (compile-time), поэтому RefCell переносит эти правила в runtime: внутри хранится флаг-счётчик состояния (BorrowState).
+
+В Rust-сообществе говорят: RefCell делает borrow-checker «ленивым» — не отказывает при компиляции, но может паниковать при запуске.`,
+          what: "Переносит проверки borrowing из compile-time в runtime. Позволяет получить &mut T через &self.",
+          why: "Когда borrow-checker мешает, а вы логически уверены в корректности. Граф, дерево, mock-объекты в тестах.",
+          how: "borrow() → Ref<T>, borrow_mut() → RefMut<T>. Правило то же: N borrow() ИЛИ 1 borrow_mut(). Нарушение → panic.",
+          danger: "Паника в рантайме если нарушить правила borrowing. Не Sync — только один поток. try_borrow_mut() → Result вместо паники.",
+          example: `use std::cell::RefCell;
+
+let data = RefCell::new(vec![1, 2, 3]);
+
+{
+    let mut v = data.borrow_mut();
+    v.push(4);
+} // RefMut дропается — лок снят
+
+println!("{:?}", data.borrow()); // [1, 2, 3, 4]
+
+// ПАНИКА:
+// let r = data.borrow();
+// let rw = data.borrow_mut(); // panic!`,
+          interview: [
+            "Когда RefCell паникует? — Когда берёшь borrow_mut() пока активен borrow() или другой borrow_mut().",
+            "RefCell vs Mutex? — RefCell для одного потока (нет системного лока, только флаг), Mutex для многопоточки (OS-примитив).",
+            "try_borrow_mut() зачем? — Возвращает Result вместо паники. Полезно когда нельзя гарантировать порядок заимствований.",
+            "Rc<RefCell<T>> — что это? — Классическая пара: Rc даёт разделённое владение, RefCell — мутабельность. Эквивалент Arc<Mutex<T>> для одного потока.",
+          ],
+        },
+      ],
+    },
+    {
+      id: "sync",
+      label: "Синхронизация потоков",
+      color: "#6bcf7f",
+      items: [
+        {
+          name: "Mutex<T>",
+          subtitle: "Mutual Exclusion",
+          thread_safe: true,
+          short: "Один поток за раз — эксклюзивный доступ",
+          etymology: `MUTEX = Mutual Exclusion — «взаимное исключение».
+
+Термин придуман Эдсгером Дейкстрой в 1960-х при разработке теории параллельного программирования.
+
+«Взаимное» — потоки взаимно исключают друг друга из критической секции. «Исключение» — один поток исключает всех остальных пока держит лок.
+
+В других языках: synchronized (Java), lock (C#), pthread_mutex (C). Концепция везде одна — термин с 1965 года.
+
+Особенность Rust: Mutex<T> — это контейнер. Данные T физически живут внутри Mutex. Невозможно обратиться к T в обход лока — компилятор не даст. В C/Java Mutex и данные существуют отдельно, и программист может «забыть» взять лок.`,
+          what: "Примитив синхронизации. Только один поток может держать лок одновременно. Данные T живут внутри.",
+          why: "Когда несколько потоков должны читать и писать общие данные.",
+          how: "lock() → MutexGuard<T>. Guard реализует DerefMut — доступ через *. Guard снимает лок при дропе (RAII).",
+          danger: "Deadlock: два потока ждут локи друг у друга. Poisoned mutex: поток паниковал держа лок → lock() вернёт Err.",
+          example: `use std::sync::{Arc, Mutex};
+use std::thread;
+
+let counter = Arc::new(Mutex::new(0_i32));
+
+let handles: Vec<_> = (0..8).map(|_| {
+    let c = Arc::clone(&counter);
+    thread::spawn(move || {
+        let mut n = c.lock().unwrap();
+        *n += 1;
+        // MutexGuard дропается → лок снят
+    })
+}).collect();
+
+for h in handles { h.join().unwrap(); }
+println!("{}", *counter.lock().unwrap()); // 8`,
+          interview: [
+            "Что такое poisoned mutex? — Если поток паникует держа лок, Mutex помечается отравленным. Другие потоки получат Err из lock(). Данные можно извлечь через .unwrap_or_else(|e| e.into_inner()).",
+            "Mutex vs RwLock? — Mutex: один поток одновременно. RwLock: много читателей ИЛИ один писатель.",
+            "Deadlock в Rust возможен? — Да. Компилятор защищает от data race, но не от deadlock.",
+            "Почему Mutex<T> лучше чем Mutex отдельно от T (как в C)? — Невозможно получить &mut T без лока — компилятор не позволит.",
+          ],
+        },
+        {
+          name: "RwLock<T>",
+          subtitle: "Read-Write Lock",
+          thread_safe: true,
+          short: "Много читателей ИЛИ один писатель",
+          etymology: `RWLOCK = Read-Write Lock — «лок чтения-записи».
+
+Название описывает два режима: Read (чтение) и Write (запись). Классический примитив из ОС 1970-х для задачи «читатели-писатели» (Readers-Writers Problem, тоже Дейкстра).
+
+Идея: чтение безопасно параллельно — читатели не мешают друг другу. Запись требует эксклюзии.
+
+Mutex — частный случай RwLock где read = write (всегда эксклюзивно).
+
+В POSIX: pthread_rwlock. В Java: ReadWriteLock. В C++: std::shared_mutex. Rust выбрал более описательное имя, раскрывающее семантику.`,
+          what: "Как Mutex, но разрешает нескольким потокам одновременно читать. Запись — эксклюзивна.",
+          why: "Когда чтений намного больше чем записей. Даёт лучший throughput чем Mutex при read-heavy нагрузке.",
+          how: "read() → RwLockReadGuard (много одновременно), write() → RwLockWriteGuard (один, блокирует всех).",
+          danger: "Writer starvation: постоянный поток читателей не даёт писателю взять лок. Deadlock тоже возможен.",
+          example: `use std::sync::{Arc, RwLock};
+use std::thread;
+
+let config = Arc::new(RwLock::new(vec!["default"]));
+
+// Много читателей одновременно — OK
+for _ in 0..5 {
+    let c = Arc::clone(&config);
+    thread::spawn(move || {
+        let r = c.read().unwrap(); // все 5 держат одновременно
+        println!("{:?}", *r);
+    });
+}
+
+// Один писатель — ждёт всех читателей
+config.write().unwrap().push("new_value");`,
+          interview: [
+            "Когда RwLock лучше Mutex? — Когда read >> write. При равном соотношении Mutex может быть быстрее.",
+            "Что такое writer starvation? — Писатель вечно ждёт пока поток читателей не отпустит лок.",
+            "Может ли RwLock задедлочиться? — Да. Например: поток держит read lock и пытается взять write lock на том же RwLock.",
+          ],
+        },
+        {
+          name: "Condvar",
+          subtitle: "Condition Variable",
+          thread_safe: true,
+          short: "Ожидание условия с атомарным снятием лока",
+          etymology: `CONDVAR = Condition Variable — «переменная условия».
+
+Термин из классики Хоара (1974, «Monitors: An Operating System Structuring Concept»).
+
+«Переменная» — потому что это примитив, ассоциированный с некоторым условием (предикатом) над данными. Поток «ждёт переменную» — ждёт пока условие не станет истинным.
+
+Ключевое: Condvar не хранит само условие — это лишь механизм оповещения. Программист сам проверяет условие в цикле while.
+
+Condvar всегда используется вместе с Mutex — это неотделимая пара. «Переменная условия» точно описывает семантику: не состояние, а точка синхронизации вокруг изменения состояния.`,
+          what: "Позволяет потоку ждать пока условие не станет истинным, атомарно освобождая Mutex.",
+          why: "Producer-Consumer паттерн. Вместо busy-waiting поток спит и просыпается по сигналу.",
+          how: "wait(guard) снимает лок и спит атомарно. notify_one()/notify_all() будит потоки. Всегда проверять условие в while.",
+          danger: "Spurious wakeups — поток может проснуться без сигнала. Всегда while !condition { wait }, никогда if.",
+          example: `use std::sync::{Arc, Mutex, Condvar};
+use std::thread;
+
+let pair = Arc::new((Mutex::new(false), Condvar::new()));
+let pair2 = Arc::clone(&pair);
+
+thread::spawn(move || {
+    let (lock, cvar) = &*pair2;
+    let mut ready = lock.lock().unwrap();
+    *ready = true;
+    cvar.notify_one();
+});
+
+let (lock, cvar) = &*pair;
+let mut ready = lock.lock().unwrap();
+while !*ready { // while — защита от spurious wakeup!
+    ready = cvar.wait(ready).unwrap();
+}
+println!("Получили сигнал!");`,
+          interview: [
+            "Что такое spurious wakeup? — Поток просыпается без notify. Это легальное поведение POSIX. Защита: while !condition.",
+            "Почему Condvar всегда с Mutex? — wait() должен атомарно снять лок и заснуть. Иначе notify может прийти до засыпания.",
+            "notify_one vs notify_all? — notify_one будит один случайный поток, notify_all — всех.",
+          ],
+        },
+        {
+          name: "Atomic",
+          subtitle: "AtomicUsize, AtomicBool...",
+          thread_safe: true,
+          short: "Lock-free операции над примитивами",
+          etymology: `ATOMIC = «атомарный», от греческого atomos — «неделимый».
+
+Атом в физике — мельчайшая частица которую нельзя разделить. В computer science «атомарная операция» — операция которую нельзя прервать на полпути.
+
+Проблема: простое i += 1 в реальности три машинные инструкции: LOAD, ADD, STORE. Между ними другой поток может сделать то же самое — одно обновление потеряется (race condition).
+
+Атомарная операция FETCH_ADD делает все три действия как одну неделимую инструкцию (LOCK XADD на x86). Никакой другой поток не может «влезть» между ними.
+
+Термин используется везде: std::atomic (C++), java.util.concurrent.atomic, sync/atomic (Go). Rust следует общепринятому термину.`,
+          what: "Атомарные операции над примитивными типами без блокировок. В std::sync::atomic.",
+          why: "Счётчики, флаги, статусы между потоками. Быстрее Mutex, нет deadlock.",
+          how: "load/store/fetch_add/compare_exchange с указанием Ordering. SeqCst — безопасный дефолт.",
+          danger: "Сложно выбрать правильный Ordering. Не подходит для сложных структур данных.",
+          example: `use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::thread;
+
+let hits = Arc::new(AtomicUsize::new(0));
+
+let handles: Vec<_> = (0..100).map(|_| {
+    let h = Arc::clone(&hits);
+    thread::spawn(move || {
+        h.fetch_add(1, Ordering::SeqCst);
+    })
+}).collect();
+for h in handles { h.join().unwrap(); }
+println!("{}", hits.load(Ordering::SeqCst)); // 100
+
+// Ordering шпаргалка:
+// Relaxed  — только атомарность, нет гарантий порядка
+// Acquire  — при load: все записи до Release видны
+// Release  — при store: виден читателю с Acquire
+// SeqCst   — строгий глобальный порядок (безопасный дефолт)`,
+          interview: [
+            "Что такое Ordering::SeqCst? — Sequentially Consistent. Все потоки видят атомарные операции в одном порядке. Самый безопасный, чуть медленнее.",
+            "Atomic vs Mutex? — Atomic: только примитивы, lock-free, быстрее. Mutex: любые данные, проще логика.",
+            "Что такое compare_exchange? — CAS (Compare And Swap): атомарно проверяет current == expected, если да — записывает new. Основа lock-free алгоритмов.",
+            "Почему Relaxed быстрее SeqCst? — Relaxed не требует memory barrier (аппаратной инструкции синхронизации кешей CPU).",
+          ],
+        },
+        {
+          name: "Barrier",
+          subtitle: "Synchronization Barrier",
+          thread_safe: true,
+          short: "Все потоки ждут друг друга в точке встречи",
+          etymology: `BARRIER = «барьер», «преграда».
+
+Метафора: все потоки бегут к барьеру. Первые добежавшие останавливаются и ждут. Только когда все N потоков достигли барьера — он поднимается и все продолжают.
+
+Визуально: ---→  --→  ----→  | БАРЬЕР |  →  →  →
+
+Это паттерн fork-join: разделить работу между потоками, подождать всех, собрать результаты.
+
+В параллельных вычислениях барьерная синхронизация — фундаментальный паттерн (MPI_Barrier в HPC, CyclicBarrier в Java). Название «barrier» — отраслевой стандарт.`,
+          what: "Точка синхронизации: все N потоков должны достичь барьера, прежде чем любой из них продолжит.",
+          why: "Параллельные вычисления где нужно дождаться всех фаз. Разделить матрицу → считать → собрать.",
+          how: "Barrier::new(N) создаёт барьер на N потоков. wait() блокирует пока все N не вызовут wait().",
+          danger: "Если один поток не дойдёт до барьера (паника, ранний выход) — остальные зависнут навсегда.",
+          example: `use std::sync::{Arc, Barrier};
+use std::thread;
+
+let barrier = Arc::new(Barrier::new(4));
+
+let handles: Vec<_> = (0..4).map(|i| {
+    let b = Arc::clone(&barrier);
+    thread::spawn(move || {
+        println!("Поток {} начал", i);
+        // ... вычисления ...
+        b.wait(); // ждём всех 4 потоков
+        println!("Поток {} продолжил", i);
+    })
+}).collect();
+
+for h in handles { h.join().unwrap(); }`,
+          interview: [
+            "Barrier vs Condvar? — Barrier: ждём ровно N потоков, семантика «встретились все». Condvar: ждём произвольного условия, более гибко.",
+            "Что вернёт wait()? — BarrierWaitResult. Один из потоков получит is_leader() = true — можно использовать для выбора лидера фазы.",
+          ],
+        },
+        {
+          name: "OnceLock<T>",
+          subtitle: "Once + Lock",
+          thread_safe: true,
+          short: "Инициализировать ровно один раз, потокобезопасно",
+          etymology: `ONCE + LOCK = OnceLock.
+
+ONCE — «один раз». Отсылка к pthread_once из POSIX: гарантирует что функция-инициализатор будет вызвана ровно один раз, даже если несколько потоков попытаются это сделать одновременно.
+
+LOCK — «замок». Внутри используется механизм блокировки для атомарной инициализации.
+
+OnceLock появился в Rust 1.70 как потокобезопасная замена LazyStatic (популярного crate). До этого был Once (без данных) — только сигнал «сделано/не сделано».
+
+Эволюция: Once (1.0) → OnceLock<T> (1.70) → LazyLock<T> (1.80).
+
+Аналоги: std::call_once (C++), sync.Once (Go).`,
+          what: "Контейнер для значения, которое можно инициализировать ровно один раз. После — только чтение.",
+          why: "Глобальные переменные, ленивая инициализация синглтонов, кеши, конфигурация.",
+          how: "get_or_init(f) — атомарно инициализирует если ещё не было. Повторный вызов возвращает уже созданное значение.",
+          danger: "Если инициализатор паникует — OnceLock остаётся не инициализированным, следующий вызов попробует снова.",
+          example: `use std::sync::OnceLock;
+
+static CONFIG: OnceLock<Vec<String>> = OnceLock::new();
+
+fn get_config() -> &'static Vec<String> {
+    CONFIG.get_or_init(|| {
+        println!("Инициализация один раз!");
+        vec!["host=localhost".to_string()]
+    })
+}
+
+// Из любого потока, сколько угодно раз:
+get_config(); // "Инициализация" — только первый раз
+get_config(); // cached, println не вызывается`,
+          interview: [
+            "OnceLock vs Mutex? — OnceLock: write один раз при старте, потом только read без лока. Mutex: многократные write/read с локом каждый раз.",
+            "OnceLock vs LazyLock? — LazyLock = OnceLock + автоматическая инициализация при первом доступе. OnceLock требует явного get_or_init.",
+          ],
+        },
+      ],
+    },
+    {
+      id: "traits",
+      label: "Send & Sync трейты",
+      color: "#f0c040",
+      items: [
+        {
+          name: "Send",
+          subtitle: "Маркерный трейт",
+          thread_safe: true,
+          short: "Тип можно передать в другой поток",
+          etymology: `SEND = «отправить».
+
+Маркерный трейт (marker trait) — без методов, только семантическая метка. Смысл: значение этого типа можно «отправить» (send) в другой поток — передать владение.
+
+Почему «Send», а не «Movable» или «ThreadSafe»? Потому что конкретная операция — перемещение значения в другой поток через channel или spawn. «Send» — именно то что происходит.
+
+thread::spawn требует F: Send. mpsc::Sender<T> требует T: Send. Это автоматически проверяется компилятором.
+
+Большинство типов Send автоматически. Исключения: Rc<T> (счётчик не атомарный), raw pointers (*const T, *mut T), RefCell<T>.`,
+          what: "Маркерный трейт. Значение типа T можно передать (move) в другой поток. Автоматически реализуется если все поля Send.",
+          why: "Фундамент системы типов Rust для безопасной многопоточности. thread::spawn принимает только Send замыкания.",
+          how: "Auto trait — реализуется автоматически. Если хотя бы одно поле не Send — тип тоже не Send.",
+          danger: "Ручная реализация unsafe impl Send — обещание компилятору. Ошибёшься — data race, UB.",
+          example: `use std::thread;
+
+// String: Send — можно отправить в поток
+let s = String::from("hello");
+thread::spawn(move || println!("{}", s));
+
+// Rc: не Send — компилятор запретит:
+// use std::rc::Rc;
+// let rc = Rc::new(42);
+// thread::spawn(move || println!("{}", rc));
+// ERROR: Rc<i32> cannot be sent between threads safely`,
+          interview: [
+            "Send vs Sync? — Send: можно передать владение T в другой поток. Sync: можно безопасно иметь &T из разных потоков одновременно. T: Sync ⟺ &T: Send.",
+            "Если T: Send, то Arc<T>: Send? — Arc<T>: Send если T: Send + Sync.",
+            "Почему *mut T не Send? — Raw pointer не имеет гарантий — компилятор консервативно считает его небезопасным для потоков.",
+          ],
+        },
+        {
+          name: "Sync",
+          subtitle: "Маркерный трейт",
+          thread_safe: true,
+          short: "На &T можно ссылаться из нескольких потоков",
+          etymology: `SYNC = Synchronize — «синхронизировать».
+
+Маркерный трейт означает: shared reference &T безопасно использовать одновременно из нескольких потоков. Тип «синхронизован» для параллельного доступа.
+
+Математически: T: Sync ⟺ &T: Send. Это эквивалентное определение из документации Rust.
+
+Почему «Sync», а не «SharedRef» или «ReadSafe»? «Sync» — короткое и ёмкое слово, традиционно означающее «работает правильно при параллельном выполнении».
+
+Примеры не-Sync: Cell<T>, RefCell<T> — изменяют состояние через &self без синхронизации. Mutex<T> Sync потому что внутри есть синхронизация.`,
+          what: "Маркерный трейт. &T можно безопасно использовать из нескольких потоков одновременно.",
+          why: "Позволяет Arc<T> быть Send. Нужен для разделения данных между потоками через Arc.",
+          how: "Auto trait — реализуется автоматически. Если хотя бы одно поле не Sync — тип тоже не Sync.",
+          danger: "RefCell<T> не Sync — Arc<RefCell<T>> не работает в многопоточке. Используй Arc<Mutex<T>>.",
+          example: `// Arc<RefCell<T>>: НЕ работает в многопоточке
+// RefCell не Sync → Arc<RefCell> не Sync → не Send
+// Компилятор запретит thread::spawn
+
+// Правильно: Arc<Mutex<T>>
+use std::sync::{Arc, Mutex};
+let shared = Arc::new(Mutex::new(vec![1, 2, 3]));
+let s2 = Arc::clone(&shared);
+std::thread::spawn(move || {
+    s2.lock().unwrap().push(4);
+});`,
+          interview: [
+            "Send vs Sync? — Send: перемещение T. Sync: разделённый &T. Оба нужны для Arc<T>.",
+            "Mutex<T>: Sync даже если T не Sync? — Да! Mutex<T>: Sync для любого T: Send. Mutex сам обеспечивает синхронизацию.",
+            "Можно ли самому реализовать Sync? — Да, через unsafe impl Sync. Это обещание компилятору что ты сам гарантируешь безопасность.",
+          ],
+        },
+      ],
+    },
+    {
+      id: "channels",
+      label: "Каналы",
+      color: "#c084fc",
+      items: [
+        {
+          name: "mpsc",
+          subtitle: "Multi-Producer Single-Consumer",
+          thread_safe: true,
+          short: "Передача сообщений между потоками",
+          etymology: `MPSC = Multi-Producer Single-Consumer — «много производителей, один потребитель».
+
+Это описание топологии канала: сколько отправителей и получателей он поддерживает.
+
+Multi-Producer: Sender<T> можно клонировать — каждый клон отправляет в тот же канал.
+Single-Consumer: Receiver<T> нельзя клонировать — один поток читает.
+
+Аббревиатура MPSC — стандартный термин в CS. Для описания каналов используют MPSC/SPSC/MPMC.
+
+Rust-каналы вдохновлены CSP (Communicating Sequential Processes, Тони Хоар, 1978) и Go-каналами. Философия: «не коммуницируй через общую память — разделяй память через коммуникацию».`,
+          what: "Стандартный канал: много отправителей (Sender), один получатель (Receiver). Данные передаются по владению.",
+          why: "Передача данных между потоками без Mutex. Часто безопаснее и читабельнее. Идиоматично для Rust.",
+          how: "channel() → (Sender, Receiver). send() отправляет, recv() блокирует. sync_channel(N) — с буфером.",
+          danger: "Receiver нельзя клонировать. channel() unbounded — возможна утечка памяти при переполнении.",
+          example: `use std::sync::mpsc;
+use std::thread;
+
+let (tx, rx) = mpsc::channel::<i32>();
+let tx2 = tx.clone(); // второй producer
+
+thread::spawn(move || tx.send(1).unwrap());
+thread::spawn(move || tx2.send(2).unwrap());
+
+// for автоматически завершается когда все Sender дропнуты
+for msg in rx {
+    println!("{}", msg);
+}`,
+          interview: [
+            "channel() vs sync_channel(N)? — channel(): unbounded, send() никогда не блокирует. sync_channel(N): буфер N, send() блокирует при переполнении (backpressure).",
+            "Когда recv() возвращает Err? — Когда все Sender дропнуты. Это нормальный способ завершить for msg in rx.",
+            "mpsc vs Arc<Mutex<Vec>>? — mpsc: данные перемещаются, нет гонок, нет deadlock. Mutex: изменяемое разделённое состояние, более гибко.",
+            "Как сделать broadcast? — В std нет. Crates: tokio::broadcast, crossbeam-channel.",
+          ],
+        },
+      ],
+    },
+  ],
+  patterns: [
+    { situation: "Readonly данные в нескольких потоках", solution: "Arc<T>", note: "T: Send + Sync" },
+    { situation: "Mutable данные в нескольких потоках", solution: "Arc<Mutex<T>>", note: "Стандартный выбор" },
+    { situation: "Много читателей, редкие записи", solution: "Arc<RwLock<T>>", note: "Лучше throughput при read >> write" },
+    { situation: "Счётчик/флаг между потоками", solution: "Arc<AtomicUsize>", note: "Lock-free, самый быстрый" },
+    { situation: "Передать данные между потоками", solution: "mpsc::channel()", note: "Предпочтительно перед Mutex" },
+    { situation: "Разделить владение, один поток", solution: "Rc<T>", note: "Дешевле Arc" },
+    { situation: "Мутация через &self, один поток", solution: "RefCell<T>", note: "Borrow checking в рантайме" },
+    { situation: "Разделить владение + мутация, 1 поток", solution: "Rc<RefCell<T>>", note: "Классическая пара для однопоточки" },
+    { situation: "Разделить владение + мутация, N потоков", solution: "Arc<Mutex<T>>", note: "Классическая пара для многопоточки" },
+    { situation: "Глобальная ленивая инициализация", solution: "OnceLock<T>", note: "Или LazyLock<T> в Rust 1.80+" },
+    { situation: "Дождаться всех потоков (fork-join)", solution: "Barrier", note: "Точка встречи N потоков" },
+    { situation: "Обратная ссылка (дерево, граф)", solution: "Weak<T>", note: "Разрыв циклов Rc/Arc" },
+  ],
+  etymology_overview: [
+    { name: "Rc", full: "Reference Counted", origin: "CS 1960-е", idea: "Счётчик ссылок — классика GC. Python, C++ shared_ptr" },
+    { name: "Arc", full: "Atomic Reference Counted", origin: "= Rc + Atomic", idea: "Rc с атомарным счётчиком для thread-safety" },
+    { name: "Weak", full: "Weak Reference", origin: "Теория GC", idea: "Слабая vs сильная ссылка. Не продлевает жизнь объекта" },
+    { name: "Cell", full: "Mutable Cell", origin: "Биологическая метафора", idea: "Непрозрачная ячейка. Только set/get целиком, без ссылок внутрь" },
+    { name: "RefCell", full: "Ref + Cell", origin: "= Reference + Cell", idea: "Ячейка которая выдаёт ссылки. Borrow-чек в рантайме" },
+    { name: "Mutex", full: "Mutual Exclusion", origin: "Дейкстра, 1965", idea: "Взаимное исключение. Термин с 1960-х, используется везде" },
+    { name: "RwLock", full: "Read-Write Lock", origin: "POSIX pthread_rwlock", idea: "Два режима: shared читатели vs exclusive писатель" },
+    { name: "Condvar", full: "Condition Variable", origin: "Хоар, 1974 (Monitors)", idea: "Ждать условия. Всегда в паре с Mutex" },
+    { name: "Atomic", full: "Atomic operation", origin: "atomos (греч.) — неделимый", idea: "CPU-инструкция LOCK XADD — физически неделимая" },
+    { name: "Barrier", full: "Synchronization Barrier", origin: "HPC / параллельные вычисления", idea: "Физическая метафора: все бегут к барьеру и ждут" },
+    { name: "OnceLock", full: "Once + Lock", origin: "POSIX pthread_once", idea: "Инициализировать ровно один раз атомарно" },
+    { name: "mpsc", full: "Multi-Producer Single-Consumer", origin: "CSP Хоара, 1978", idea: "Топология канала. Вдохновение: Go-каналы" },
+    { name: "Send", full: "Send (marker trait)", origin: "Rust 1.0", idea: "Отправить владение в другой поток" },
+    { name: "Sync", full: "Synchronize (marker trait)", origin: "Rust 1.0", idea: "T: Sync ⟺ &T: Send. Безопасный shared access" },
+  ],
+};
+
+function useIsMobile() {
+  const [isMobile, setIsMobile] = React.useState(window.innerWidth < 600);
+  React.useEffect(() => {
+    const handler = () => setIsMobile(window.innerWidth < 600);
+    window.addEventListener('resize', handler);
+    return () => window.removeEventListener('resize', handler);
+  }, []);
+  return isMobile;
+}
+
+function RustConcurrency() {
+  const [activeCategory, setActiveCategory] = useState("ownership");
+  const [activeItem, setActiveItem] = useState(null);
+  const [tab, setTab] = useState("what");
+  const [view, setView] = useState("cards");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const isMobile = useIsMobile();
+
+  const category = data.categories.find(c => c.id === activeCategory);
+  const item = activeItem ? category?.items.find(i => i.name === activeItem) : null;
+
+  const tabLabels = {
+    what: "Что это?",
+    why: "Зачем?",
+    how: "Как работает",
+    etymology: "Название",
+    danger: "⚠ Опасности",
+    example: "Код",
+    interview: "Вопросы"
+  };
+
+  const handleSelectItem = (catId, itemName) => {
+    setActiveCategory(catId);
+    setActiveItem(itemName);
+    setTab("what");
+    setSidebarOpen(false);
+  };
+
+  // ── Shared header ──────────────────────────────────────────────────────────
+  const Header = () => (
+    <div style={{
+      borderBottom: "1px solid #1e2330",
+      padding: isMobile ? "12px 14px" : "14px 22px",
+      display: "flex", alignItems: "center", gap: 10,
+      position: "sticky", top: 0, zIndex: 100,
+      background: "#0d0f14"
+    }}>
+      {isMobile && view === "cards" && (
+        <button
+          onClick={() => { if (item) { setActiveItem(null); } else { setSidebarOpen(v => !v); } }}
+          style={{ background: "none", border: "none", color: "#4a9eff", cursor: "pointer", fontSize: 18, padding: "0 4px 0 0", lineHeight: 1 }}
+        >
+          {item ? "←" : "☰"}
+        </button>
+      )}
+      <div style={{ fontSize: isMobile ? 15 : 18, fontWeight: 800, letterSpacing: -1 }}>
+        <span style={{ color: "#e8793a" }}>Rust</span>
+        <span style={{ color: "#4a9eff" }}>::concurrency</span>
+      </div>
+      <div style={{ marginLeft: "auto", display: "flex", gap: 5 }}>
+        {[["cards", "Типы"], ["patterns", "Паттерны"], ["etymology", "Этимология"]].map(([v, label]) => (
+          <button key={v} onClick={() => { setView(v); setActiveItem(null); setSidebarOpen(false); }} style={{
+            padding: isMobile ? "4px 8px" : "5px 12px",
+            borderRadius: 6, border: "1px solid", cursor: "pointer",
+            fontSize: isMobile ? 10 : 11, fontFamily: "inherit",
+            background: view === v ? "#1e2330" : "transparent",
+            borderColor: view === v ? "#4a9eff" : "#2a3040",
+            color: view === v ? "#4a9eff" : "#6b7a94"
+          }}>{label}</button>
+        ))}
+      </div>
+    </div>
+  );
+
+  // ── Sidebar content ────────────────────────────────────────────────────────
+  const SidebarContent = () => (
+    <>
+      {data.categories.map(cat => (
+        <div key={cat.id}>
+          <div style={{ fontSize: 9, fontWeight: 700, color: "#3d4a60", padding: "8px 14px 3px", letterSpacing: 1, textTransform: "uppercase" }}>
+            {cat.label}
+          </div>
+          {cat.items.map(it => (
+            <div key={it.name}
+              onClick={() => handleSelectItem(cat.id, it.name)}
+              style={{
+                padding: isMobile ? "10px 14px" : "7px 14px",
+                cursor: "pointer", display: "flex", alignItems: "center", gap: 7,
+                background: activeItem === it.name && activeCategory === cat.id ? "#111d2c" : "transparent",
+                borderLeft: activeItem === it.name && activeCategory === cat.id ? `3px solid ${cat.color}` : "3px solid transparent",
+              }}>
+              <span style={{ fontSize: isMobile ? 14 : 12, fontWeight: 700, color: cat.color }}>{it.name}</span>
+              <span style={{ fontSize: 9, background: it.thread_safe ? "#0d2a1a" : "#2a1a0d", color: it.thread_safe ? "#6bcf7f" : "#e8793a", borderRadius: 3, padding: "1px 4px" }}>
+                {it.thread_safe ? "MT" : "ST"}
+              </span>
+            </div>
+          ))}
+        </div>
+      ))}
+    </>
+  );
+
+  // ── PATTERNS view ──────────────────────────────────────────────────────────
+  const PatternsView = () => (
+    <div style={{ padding: isMobile ? "14px" : "22px", maxWidth: 860, margin: "0 auto" }}>
+      <div style={{ fontSize: 11, color: "#6b7a94", marginBottom: 14 }}>Задача → правильный инструмент</div>
+      <div style={{ display: "grid", gap: 7 }}>
+        {data.patterns.map((p, i) => (
+          <div key={i} style={{
+            background: "#111420", border: "1px solid #1e2330", borderRadius: 9,
+            padding: isMobile ? "11px 13px" : "13px 18px",
+            display: "grid",
+            gridTemplateColumns: isMobile ? "1fr" : "1fr 28px 1fr",
+            gap: isMobile ? 5 : 10, alignItems: "center"
+          }}>
+            <div style={{ fontSize: isMobile ? 12 : 12, color: "#8a9ab5" }}>{p.situation}</div>
+            {!isMobile && <div style={{ color: "#3d4a60", textAlign: "center" }}>→</div>}
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+              {isMobile && <span style={{ color: "#3d4a60", fontSize: 12 }}>→</span>}
+              <span style={{ fontSize: isMobile ? 14 : 15, fontWeight: 700, color: "#6bcf7f" }}>{p.solution}</span>
+              <span style={{ fontSize: 10, color: "#6b7a94" }}>{p.note}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  // ── ETYMOLOGY view ─────────────────────────────────────────────────────────
+  const EtymologyView = () => (
+    <div style={{ padding: isMobile ? "14px" : "22px", maxWidth: 1000, margin: "0 auto" }}>
+      <div style={{ fontSize: 11, color: "#6b7a94", marginBottom: 14 }}>Почему типы называются именно так</div>
+      <div style={{ display: "grid", gap: 7 }}>
+        {data.etymology_overview.map((e, idx) => (
+          <div key={idx} style={{
+            background: "#111420", border: "1px solid #1e2330", borderRadius: 9,
+            padding: isMobile ? "11px 13px" : "13px 18px",
+            display: "grid",
+            gridTemplateColumns: isMobile ? "70px 1fr" : "80px 200px 1fr",
+            gap: isMobile ? 10 : 14, alignItems: "start"
+          }}>
+            <div style={{ fontSize: isMobile ? 13 : 14, fontWeight: 800, color: "#e8793a" }}>{e.name}</div>
+            {isMobile ? (
+              <div>
+                <div style={{ fontSize: 11, color: "#4a9eff", marginBottom: 2 }}>{e.full}</div>
+                <div style={{ fontSize: 11, color: "#8a9ab5", lineHeight: 1.5, marginTop: 3 }}>{e.idea}</div>
+                <div style={{ fontSize: 10, color: "#3d4a60", marginTop: 2 }}>{e.origin}</div>
+              </div>
+            ) : (
+              <>
+                <div>
+                  <div style={{ fontSize: 11, color: "#4a9eff", marginBottom: 3 }}>{e.full}</div>
+                  <div style={{ fontSize: 10, color: "#3d4a60" }}>{e.origin}</div>
+                </div>
+                <div style={{ fontSize: 12, color: "#8a9ab5", lineHeight: 1.5 }}>{e.idea}</div>
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+      <div style={{ marginTop: 16, background: "#0a1628", borderLeft: "4px solid #4a9eff", borderRadius: 8, padding: isMobile ? "12px 14px" : "14px 18px", fontSize: 12, color: "#8a9ab5", lineHeight: 1.9 }}>
+        <span style={{ color: "#4a9eff", fontWeight: 700 }}>Паттерн именования в Rust: </span>
+        имена раскрывают механизм реализации, а не абстрактное назначение.{"\n"}
+        Rc = Reference Counted, Arc = Atomic + Rc, RefCell = Ref + Cell, OnceLock = Once + Lock.{"\n"}
+        <span style={{ color: "#f0c040" }}>Совет для собеседования: </span>если знаешь расшифровку — уже понятно как это работает.
+      </div>
+    </div>
+  );
+
+  // ── Item detail view ───────────────────────────────────────────────────────
+  const ItemDetail = () => (
+    <div style={{ padding: isMobile ? "14px" : "20px 24px" }}>
+      <div style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        {!isMobile && (
+          <>
+            <button onClick={() => setActiveItem(null)} style={{ background: "none", border: "none", color: "#4a9eff", cursor: "pointer", fontSize: 11, fontFamily: "inherit", padding: 0 }}>← Все</button>
+            <span style={{ color: "#3d4a60" }}>/</span>
+          </>
+        )}
+        <span style={{ fontSize: isMobile ? 18 : 20, fontWeight: 800, color: category.color }}>{item.name}</span>
+        <span style={{ fontSize: isMobile ? 11 : 12, color: "#6b7a94" }}>{item.subtitle}</span>
+        <span style={{ fontSize: 10, background: item.thread_safe ? "#0d2a1a" : "#2a1a0d", color: item.thread_safe ? "#6bcf7f" : "#e8793a", borderRadius: 5, padding: "3px 9px", marginLeft: "auto" }}>
+          {item.thread_safe ? "✓ Thread-Safe" : "✗ Single Thread"}
+        </span>
+      </div>
+
+      <div style={{ background: "#0a1628", borderLeft: `4px solid ${category.color}`, borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: isMobile ? 13 : 13, color: "#c8d0e0" }}>
+        {item.short}
+      </div>
+
+      {/* Tab buttons — horizontal scroll on mobile */}
+      <div style={{ display: "flex", gap: 5, marginBottom: 14, overflowX: "auto", WebkitOverflowScrolling: "touch", paddingBottom: 2 }}>
+        {Object.entries(tabLabels).map(([key, label]) => (
+          <button key={key} onClick={() => setTab(key)} style={{
+            padding: "5px 10px", borderRadius: 6, border: "1px solid", cursor: "pointer",
+            fontSize: isMobile ? 11 : 11, fontFamily: "inherit", whiteSpace: "nowrap", flexShrink: 0,
+            background: tab === key ? category.color + "20" : "transparent",
+            borderColor: tab === key ? category.color : "#2a3040",
+            color: tab === key ? category.color : "#6b7a94"
+          }}>{label}</button>
+        ))}
+      </div>
+
+      <div style={{ background: "#111420", border: "1px solid #1e2330", borderRadius: 10, padding: isMobile ? "13px 14px" : "16px 20px" }}>
+        {tab === "example" ? (
+          <pre style={{ margin: 0, fontSize: isMobile ? 11 : 12, lineHeight: 1.7, color: "#c8d0e0", overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+            <code>{item.example}</code>
+          </pre>
+        ) : tab === "interview" ? (
+          <div style={{ display: "grid", gap: 13 }}>
+            {item.interview.map((q, i) => {
+              const sepIdx = q.indexOf("? — ");
+              const question = sepIdx !== -1 ? q.slice(0, sepIdx) : q;
+              const answer = sepIdx !== -1 ? q.slice(sepIdx + 4) : "";
+              return (
+                <div key={i} style={{ borderLeft: "3px solid #c084fc", paddingLeft: 12 }}>
+                  <div style={{ color: "#c084fc", fontWeight: 700, marginBottom: 4, fontSize: isMobile ? 12 : 12 }}>❓ {question}{sepIdx !== -1 ? "?" : ""}</div>
+                  {answer && <div style={{ color: "#8a9ab5", fontSize: isMobile ? 12 : 12, lineHeight: 1.7 }}>{answer}</div>}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div style={{ fontSize: isMobile ? 13 : 12, lineHeight: 2, color: "#8a9ab5", whiteSpace: "pre-wrap" }}>
+            {tab === "danger" && <span style={{ color: "#e8793a", marginRight: 6 }}>⚠</span>}
+            {item[tab]}
+          </div>
+        )}
+      </div>
+
+      {/* Related chips */}
+      <div style={{ display: "flex", gap: 7, marginTop: 14, flexWrap: "wrap" }}>
+        {data.categories.flatMap(cat => cat.items).filter(i => i.name !== item.name).slice(0, 6).map(relItem => {
+          const relCat = data.categories.find(c => c.items.some(i => i.name === relItem.name));
+          return (
+            <div key={relItem.name}
+              onClick={() => handleSelectItem(relCat.id, relItem.name)}
+              style={{ background: "#0d0f14", border: "1px solid #1e2330", borderRadius: 6, padding: "6px 11px", cursor: "pointer", fontSize: 11 }}>
+              <span style={{ color: relCat.color, fontWeight: 700 }}>{relItem.name}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  // ── Cards grid ─────────────────────────────────────────────────────────────
+  const CardsGrid = () => (
+    <div style={{
+      padding: isMobile ? "14px" : "20px 24px",
+      display: "grid",
+      gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(auto-fill, minmax(230px, 1fr))",
+      gap: isMobile ? 9 : 11
+    }}>
+      {data.categories.flatMap(cat => cat.items.map(it => (
+        <div key={it.name}
+          onClick={() => handleSelectItem(cat.id, it.name)}
+          style={{ background: "#111420", border: "1px solid #1e2330", borderTop: `3px solid ${cat.color}`, borderRadius: 10, padding: isMobile ? "11px 12px" : "14px 16px", cursor: "pointer" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, flexWrap: "wrap" }}>
+            <span style={{ fontSize: isMobile ? 13 : 15, fontWeight: 800, color: cat.color }}>{it.name}</span>
+            <span style={{ fontSize: 9, background: it.thread_safe ? "#0d2a1a" : "#2a1a0d", color: it.thread_safe ? "#6bcf7f" : "#e8793a", borderRadius: 3, padding: "1px 4px" }}>
+              {it.thread_safe ? "MT" : "ST"}
+            </span>
+          </div>
+          {!isMobile && <div style={{ fontSize: 10, color: "#6b7a94", marginBottom: 4 }}>{it.subtitle}</div>}
+          <div style={{ fontSize: isMobile ? 11 : 11, color: "#8a9ab5", lineHeight: 1.4 }}>{it.short}</div>
+        </div>
+      )))}
+    </div>
+  );
+
+  // ── DESKTOP layout ─────────────────────────────────────────────────────────
+  if (!isMobile) {
+    return (
+      <div style={{ fontFamily: "'JetBrains Mono', 'Fira Code', monospace", background: "#0d0f14", minHeight: "100vh", color: "#c8d0e0" }}>
+        <Header />
+        {view === "patterns" && <PatternsView />}
+        {view === "etymology" && <EtymologyView />}
+        {view === "cards" && (
+          <div style={{ display: "flex", height: "calc(100vh - 55px)" }}>
+            <div style={{ width: 200, borderRight: "1px solid #1e2330", padding: "12px 0", overflowY: "auto", flexShrink: 0 }}>
+              <SidebarContent />
+            </div>
+            <div style={{ flex: 1, overflowY: "auto" }}>
+              {item ? <ItemDetail /> : <CardsGrid />}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── MOBILE layout ──────────────────────────────────────────────────────────
+  return (
+    <div style={{ fontFamily: "'JetBrains Mono', 'Fira Code', monospace", background: "#0d0f14", minHeight: "100vh", color: "#c8d0e0", position: "relative" }}>
+      <Header />
+
+      {/* Drawer overlay */}
+      {sidebarOpen && (
+        <div
+          onClick={() => setSidebarOpen(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 200 }}
+        />
+      )}
+
+      {/* Drawer panel */}
+      <div style={{
+        position: "fixed", top: 0, left: 0, bottom: 0, width: "78vw", maxWidth: 300,
+        background: "#0d0f14", borderRight: "1px solid #1e2330",
+        zIndex: 300, overflowY: "auto", padding: "16px 0",
+        transform: sidebarOpen ? "translateX(0)" : "translateX(-100%)",
+        transition: "transform 0.22s ease",
+      }}>
+        <div style={{ padding: "0 14px 12px", fontSize: 14, fontWeight: 800, color: "#6b7a94", borderBottom: "1px solid #1e2330", marginBottom: 6 }}>
+          Выбери тип
+        </div>
+        <SidebarContent />
+      </div>
+
+      {/* Main content */}
+      <div style={{ overflowY: "auto" }}>
+        {view === "patterns" && <PatternsView />}
+        {view === "etymology" && <EtymologyView />}
+        {view === "cards" && (
+          item ? <ItemDetail /> : <CardsGrid />
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+const { useState } = React;
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(React.createElement(RustConcurrency));
+
+  </script>
+</body>
+</html>
