@@ -3,24 +3,20 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Rust::concurrency — шпаргалка</title>
+  <title>Rust::concurrency</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: #0d0f14; }
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    html, body { height: 100%; }
+    body { background: #0d0f14; font-family: 'JetBrains Mono','Fira Code','Cascadia Code',monospace; color: #c8d0e0; }
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
     ::-webkit-scrollbar-track { background: #0d0f14; }
     ::-webkit-scrollbar-thumb { background: #2a3040; border-radius: 3px; }
+    button { font-family: inherit; }
   </style>
 </head>
 <body>
-  <div id="root"></div>
-
-  <!-- React 18 + Babel standalone -->
-  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-
-  <script type="text/babel" data-presets="react">
+  <div id="app"></div>
+  <script>
 const data = {
   categories: [
     {
@@ -42,7 +38,7 @@ const data = {
 Почему не «SharedPtr»? Rust предпочитает имена, раскрывающие реализацию, а не абстрактное назначение. «Reference Counted» честно говорит как это работает под капотом.`,
           what: "Умный указатель с подсчётом ссылок. Позволяет нескольким переменным владеть одним значением.",
           why: "Когда нужно разделить владение данными, но вы точно знаете что работаете в одном потоке.",
-          how: "Rc::new(value), Rc::clone(&rc) — увеличивает счётчик. Данные дропаются когда счётчик = 0.",
+          how: "::new(value) создаёт экземпляр, ::clone(&ptr) клонирует — увеличивает счётчик. Данные дропаются когда счётчик = 0.",
           danger: "Не Send, не Sync — нельзя отправить в другой поток. В многопоточке → Arc. Циклические ссылки → утечка памяти (используй Weak).",
           example: `use std::rc::Rc;
 
@@ -73,7 +69,7 @@ Arc заменяет usize на AtomicUsize. Операции fetch_add/fetch_su
 Буква A стоит первой намеренно: Arc = Rc + Atomic. Всё остальное идентично.`,
           what: "То же что Rc, но счётчик ссылок изменяется атомарно — безопасно между потоками.",
           why: "Нужно разделить данные между потоками. Для мутации оборачивается в Mutex или RwLock.",
-          how: "Arc::new(val), Arc::clone(&arc). Реализует Send + Sync если T: Send + Sync.",
+          how: "::new(val) создаёт, ::clone(&ptr) клонирует — атомарный инкремент счётчика. Реализует Send + Sync если T: Send + Sync.",
           danger: "Чуть медленнее Rc из-за атомарных операций. Сам по себе не даёт мутабельность — нужен Arc<Mutex<T>>.",
           example: `use std::sync::Arc;
 use std::thread;
@@ -106,8 +102,8 @@ println!("{:?}", data); // data всё ещё жива здесь`,
 
 Weak::upgrade() возвращает Option<Arc<T>> — Some если объект ещё жив, None если уже дропнут. Это честно: «я не уверен что он ещё существует».`,
           what: "Не-владеющая ссылка. Не увеличивает strong_count. Получается через Arc::downgrade(&arc).",
-          why: "Разрыв циклических ссылок. Например, дерево: родитель Arc-владеет детьми, дети Weak-ссылаются на родителя.",
-          how: "Arc::downgrade(&arc) → Weak<T>. weak.upgrade() → Option<Arc<T>>. Если strong_count = 0 — upgrade вернёт None.",
+          why: "Разрыв циклических ссылок. Например, дерево: родитель Arc-владеет детьми, дети держат слабую ссылку на родителя.",
+          how: "Arc::downgrade(&ptr) → слабая ссылка. .upgrade() → Option<Arc<T>>. Если strong_count = 0 — upgrade вернёт None.",
           danger: "upgrade() может вернуть None — всегда обрабатывай оба варианта.",
           example: `use std::sync::{Arc, Weak};
 
@@ -143,7 +139,7 @@ Cell<T> именно так и работает: нельзя получить �
 Именно поэтому Cell работает только с Copy-типами: get() обязан копировать значение, иначе нарушится модель владения.`,
           what: "Позволяет менять значение через shared reference (&self). Работает только с Copy-типами.",
           why: "Когда нужно изменять примитив через &self без overhead RefCell (нет runtime borrow-чекинга).",
-          how: "cell.get() копирует значение, cell.set(val) заменяет. Нет borrow-чекинга — нет паники. Нет ссылок внутрь.",
+          how: ".get() копирует значение, .set(val) заменяет целиком. Нет borrow-чекинга — нет паники. Нет ссылок внутрь.",
           danger: "Только Copy-типы. Не Send — только для одного потока. Нельзя получить &T или &mut T.",
           example: `use std::cell::Cell;
 
@@ -178,7 +174,7 @@ impl Config {
 В Rust-сообществе говорят: RefCell делает borrow-checker «ленивым» — не отказывает при компиляции, но может паниковать при запуске.`,
           what: "Переносит проверки borrowing из compile-time в runtime. Позволяет получить &mut T через &self.",
           why: "Когда borrow-checker мешает, а вы логически уверены в корректности. Граф, дерево, mock-объекты в тестах.",
-          how: "borrow() → Ref<T>, borrow_mut() → RefMut<T>. Правило то же: N borrow() ИЛИ 1 borrow_mut(). Нарушение → panic.",
+          how: "borrow() → Guard на чтение, borrow_mut() → Guard на запись. N читателей ИЛИ 1 писатель. Нарушение → panic.",
           danger: "Паника в рантайме если нарушить правила borrowing. Не Sync — только один поток. try_borrow_mut() → Result вместо паники.",
           example: `use std::cell::RefCell;
 
@@ -224,7 +220,7 @@ println!("{:?}", data.borrow()); // [1, 2, 3, 4]
 Особенность Rust: Mutex<T> — это контейнер. Данные T физически живут внутри Mutex. Невозможно обратиться к T в обход лока — компилятор не даст. В C/Java Mutex и данные существуют отдельно, и программист может «забыть» взять лок.`,
           what: "Примитив синхронизации. Только один поток может держать лок одновременно. Данные T живут внутри.",
           why: "Когда несколько потоков должны читать и писать общие данные.",
-          how: "lock() → MutexGuard<T>. Guard реализует DerefMut — доступ через *. Guard снимает лок при дропе (RAII).",
+          how: "lock() → Guard<T> (реализует DerefMut, доступ через *). Guard снимает лок при дропе (RAII).",
           danger: "Deadlock: два потока ждут локи друг у друга. Poisoned mutex: поток паниковал держа лок → lock() вернёт Err.",
           example: `use std::sync::{Arc, Mutex};
 use std::thread;
@@ -265,7 +261,7 @@ Mutex — частный случай RwLock где read = write (всегда �
 В POSIX: pthread_rwlock. В Java: ReadWriteLock. В C++: std::shared_mutex. Rust выбрал более описательное имя, раскрывающее семантику.`,
           what: "Как Mutex, но разрешает нескольким потокам одновременно читать. Запись — эксклюзивна.",
           why: "Когда чтений намного больше чем записей. Даёт лучший throughput чем Mutex при read-heavy нагрузке.",
-          how: "read() → RwLockReadGuard (много одновременно), write() → RwLockWriteGuard (один, блокирует всех).",
+          how: "read() → ReadGuard (много одновременно), write() → WriteGuard (один, блокирует всех).",
           danger: "Writer starvation: постоянный поток читателей не даёт писателю взять лок. Deadlock тоже возможен.",
           example: `use std::sync::{Arc, RwLock};
 use std::thread;
@@ -393,7 +389,7 @@ println!("{}", hits.load(Ordering::SeqCst)); // 100
 В параллельных вычислениях барьерная синхронизация — фундаментальный паттерн (MPI_Barrier в HPC, CyclicBarrier в Java). Название «barrier» — отраслевой стандарт.`,
           what: "Точка синхронизации: все N потоков должны достичь барьера, прежде чем любой из них продолжит.",
           why: "Параллельные вычисления где нужно дождаться всех фаз. Разделить матрицу → считать → собрать.",
-          how: "Barrier::new(N) создаёт барьер на N потоков. wait() блокирует пока все N не вызовут wait().",
+          how: "::new(N) создаёт точку синхронизации на N потоков. .wait() блокирует пока все N не вызовут .wait().",
           danger: "Если один поток не дойдёт до барьера (паника, ранний выход) — остальные зависнут навсегда.",
           example: `use std::sync::{Arc, Barrier};
 use std::thread;
@@ -476,9 +472,9 @@ get_config(); // cached, println не вызывается`,
 thread::spawn требует F: Send. mpsc::Sender<T> требует T: Send. Это автоматически проверяется компилятором.
 
 Большинство типов Send автоматически. Исключения: Rc<T> (счётчик не атомарный), raw pointers (*const T, *mut T), RefCell<T>.`,
-          what: "Маркерный трейт. Значение типа T можно передать (move) в другой поток. Автоматически реализуется если все поля Send.",
-          why: "Фундамент системы типов Rust для безопасной многопоточности. thread::spawn принимает только Send замыкания.",
-          how: "Auto trait — реализуется автоматически. Если хотя бы одно поле не Send — тип тоже не Send.",
+          what: "Маркерный трейт. Значение типа T можно передать (move) в другой поток. Автоматически реализуется если все поля реализуют этот трейт.",
+          why: "Фундамент системы типов Rust для безопасной многопоточности. thread::spawn принимает только замыкания реализующие этот трейт.",
+          how: "Auto trait — реализуется автоматически. Если хотя бы одно поле не реализует трейт — тип тоже не реализует.",
           danger: "Ручная реализация unsafe impl Send — обещание компилятору. Ошибёшься — data race, UB.",
           example: `use std::thread;
 
@@ -513,7 +509,7 @@ thread::spawn(move || println!("{}", s));
 Примеры не-Sync: Cell<T>, RefCell<T> — изменяют состояние через &self без синхронизации. Mutex<T> Sync потому что внутри есть синхронизация.`,
           what: "Маркерный трейт. &T можно безопасно использовать из нескольких потоков одновременно.",
           why: "Позволяет Arc<T> быть Send. Нужен для разделения данных между потоками через Arc.",
-          how: "Auto trait — реализуется автоматически. Если хотя бы одно поле не Sync — тип тоже не Sync.",
+          how: "Auto trait — реализуется автоматически. Если хотя бы одно поле не реализует трейт — тип тоже не реализует.",
           danger: "RefCell<T> не Sync — Arc<RefCell<T>> не работает в многопоточке. Используй Arc<Mutex<T>>.",
           example: `// Arc<RefCell<T>>: НЕ работает в многопоточке
 // RefCell не Sync → Arc<RefCell> не Sync → не Send
@@ -613,341 +609,646 @@ for msg in rx {
   ],
 };
 
-function useIsMobile() {
-  const [isMobile, setIsMobile] = React.useState(window.innerWidth < 600);
-  React.useEffect(() => {
-    const handler = () => setIsMobile(window.innerWidth < 600);
-    window.addEventListener('resize', handler);
-    return () => window.removeEventListener('resize', handler);
-  }, []);
-  return isMobile;
+// ─── state ─────────────────────────────────────────────────────────────────
+const state = {
+  view: 'cards',
+  activeCategory: 'ownership',
+  activeItem: null,
+  tab: 'what',
+  sidebarOpen: false,
+  isMobile: window.innerWidth < 600,
+  quiz: {
+    phase: 'setup',
+    deck: [],
+    index: 0,
+    knownIds: [],
+    unknownIds: [],
+    selCats: null,
+    selFmts: null,
+  }
+};
+
+window.addEventListener('resize', () => {
+  const was = state.isMobile;
+  state.isMobile = window.innerWidth < 600;
+  if (was !== state.isMobile) render();
+});
+
+function set(patch) { Object.assign(state, patch); render(); }
+function setQ(patch) { Object.assign(state.quiz, patch); render(); }
+
+// ─── helpers ───────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length-1; i > 0; i--) {
+    const j = Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]];
+  }
+  return a;
 }
 
-function RustConcurrency() {
-  const [activeCategory, setActiveCategory] = useState("ownership");
-  const [activeItem, setActiveItem] = useState(null);
-  const [tab, setTab] = useState("what");
-  const [view, setView] = useState("cards");
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const isMobile = useIsMobile();
+// ─── card formats ──────────────────────────────────────────────────────────
+const FMTS = [
+  { id:'name_what',   label:'Название → Что это?',
+    front: i=>({q:'Что это такое?',                  v:i.name,    hint:null}),
+    back:  i=>({q:'Определение',                     v:i.what}) },
+  { id:'what_name',   label:'Определение → Название',
+    front: i=>({q:'Это определение какого типа?',    v:i.what,    hint:null}),
+    back:  i=>({q:'Тип',                             v:i.name,    hint:i.subtitle}) },
+  { id:'name_why',    label:'Название → Зачем?',
+    front: i=>({q:'Когда и зачем используется?',     v:i.name,    hint:null}),
+    back:  i=>({q:'Use-case',                        v:i.why}) },
+  { id:'why_name',    label:'Use-case → Название',
+    front: i=>({q:'Для этой задачи — какой тип?',   v:i.why,     hint:null}),
+    back:  i=>({q:'Тип',                             v:i.name,    hint:i.subtitle}) },
+  { id:'name_how',    label:'Название → Как работает?',
+    front: i=>({q:'Как это работает внутри?',        v:i.name,    hint:null}),
+    back:  i=>({q:'Механизм',                        v:i.how}) },
+  { id:'how_name',    label:'Механизм → Название',
+    front: i=>({q:'Что это за механизм?',            v:i.how,     hint:null}),
+    back:  i=>({q:'Тип',                             v:i.name,    hint:i.subtitle}) },
+  { id:'name_danger', label:'Название → Опасности',
+    front: i=>({q:'Какие подводные камни?',          v:i.name,    hint:null}),
+    back:  i=>({q:'⚠ Опасности',                    v:i.danger}) },
+  { id:'short_name',  label:'Краткое описание → Название',
+    front: i=>({q:'Что это за тип?',                 v:i.short,   hint:null}),
+    back:  i=>({q:'Тип',                             v:i.name,    hint:i.subtitle}) },
+  { id:'etym_name',   label:'Расшифровка → Название',
+    front: i=>({q:'Назови тип по расшифровке:',      v:i.subtitle,hint:null}),
+    back:  i=>({q:'Тип',                             v:i.name,    hint:i.short}) },
+  { id:'name_etym',   label:'Название → Расшифровка',
+    front: i=>({q:'Расшифруй название:',             v:i.name,    hint:null}),
+    back:  i=>({q:'Расшифровка',                     v:i.subtitle,hint:i.short}) },
+];
 
-  const category = data.categories.find(c => c.id === activeCategory);
-  const item = activeItem ? category?.items.find(i => i.name === activeItem) : null;
+function buildDeck(selCats, selFmts) {
+  const items = data.categories
+    .filter(c => selCats.includes(c.id))
+    .flatMap(c => c.items.map(i => ({...i, catColor:c.color})));
+  const fmts = FMTS.filter(f => selFmts.includes(f.id));
+  return shuffle(items.flatMap(it => fmts.map(fmt =>
+    ({item:it, fmt, id:it.name+'|'+fmt.id, flipped:false})
+  )));
+}
 
-  const tabLabels = {
-    what: "Что это?",
-    why: "Зачем?",
-    how: "Как работает",
-    etymology: "Название",
-    danger: "⚠ Опасности",
-    example: "Код",
-    interview: "Вопросы"
-  };
+// ─── TAB labels ────────────────────────────────────────────────────────────
+const TABS = {what:'Что это?',why:'Зачем?',how:'Как работает',
+              etymology:'Название',danger:'⚠ Опасности',example:'Код',interview:'Вопросы'};
 
-  const handleSelectItem = (catId, itemName) => {
-    setActiveCategory(catId);
-    setActiveItem(itemName);
-    setTab("what");
-    setSidebarOpen(false);
-  };
+// ─── RENDER ─────────────────────────────────────────────────────────────────
+function render() {
+  document.getElementById('app').innerHTML = buildHTML();
+}
 
-  // ── Shared header ──────────────────────────────────────────────────────────
-  const Header = () => (
-    <div style={{
-      borderBottom: "1px solid #1e2330",
-      padding: isMobile ? "12px 14px" : "14px 22px",
-      display: "flex", alignItems: "center", gap: 10,
-      position: "sticky", top: 0, zIndex: 100,
-      background: "#0d0f14"
-    }}>
-      {isMobile && view === "cards" && (
-        <button
-          onClick={() => { if (item) { setActiveItem(null); } else { setSidebarOpen(v => !v); } }}
-          style={{ background: "none", border: "none", color: "#4a9eff", cursor: "pointer", fontSize: 18, padding: "0 4px 0 0", lineHeight: 1 }}
-        >
-          {item ? "←" : "☰"}
-        </button>
-      )}
-      <div style={{ fontSize: isMobile ? 15 : 18, fontWeight: 800, letterSpacing: -1 }}>
-        <span style={{ color: "#e8793a" }}>Rust</span>
-        <span style={{ color: "#4a9eff" }}>::concurrency</span>
-      </div>
-      <div style={{ marginLeft: "auto", display: "flex", gap: 5 }}>
-        {[["cards", "Типы"], ["patterns", "Паттерны"], ["etymology", "Этимология"]].map(([v, label]) => (
-          <button key={v} onClick={() => { setView(v); setActiveItem(null); setSidebarOpen(false); }} style={{
-            padding: isMobile ? "4px 8px" : "5px 12px",
-            borderRadius: 6, border: "1px solid", cursor: "pointer",
-            fontSize: isMobile ? 10 : 11, fontFamily: "inherit",
-            background: view === v ? "#1e2330" : "transparent",
-            borderColor: view === v ? "#4a9eff" : "#2a3040",
-            color: view === v ? "#4a9eff" : "#6b7a94"
-          }}>{label}</button>
-        ))}
-      </div>
-    </div>
-  );
+function buildHTML() {
+  const m = state.isMobile;
+  const v = state.view;
+  if (v === 'quiz')      return header() + quizSubHeader() + quizBody();
+  if (v === 'patterns')  return header() + patterns();
+  if (v === 'etymology') return header() + etymology();
+  // cards
+  if (m) return header() + drawer() + `<div>${state.activeItem ? itemDetail() : cardsGrid()}</div>`;
+  return header() + `<div style="display:flex;height:calc(100vh - 52px)">
+    <div style="width:200px;border-right:1px solid #1e2330;padding:12px 0;overflow-y:auto;flex-shrink:0">${sidebar()}</div>
+    <div style="flex:1;overflow-y:auto">${state.activeItem ? itemDetail() : cardsGrid()}</div>
+  </div>`;
+}
 
-  // ── Sidebar content ────────────────────────────────────────────────────────
-  const SidebarContent = () => (
-    <>
-      {data.categories.map(cat => (
-        <div key={cat.id}>
-          <div style={{ fontSize: 9, fontWeight: 700, color: "#3d4a60", padding: "8px 14px 3px", letterSpacing: 1, textTransform: "uppercase" }}>
-            {cat.label}
-          </div>
-          {cat.items.map(it => (
-            <div key={it.name}
-              onClick={() => handleSelectItem(cat.id, it.name)}
-              style={{
-                padding: isMobile ? "10px 14px" : "7px 14px",
-                cursor: "pointer", display: "flex", alignItems: "center", gap: 7,
-                background: activeItem === it.name && activeCategory === cat.id ? "#111d2c" : "transparent",
-                borderLeft: activeItem === it.name && activeCategory === cat.id ? `3px solid ${cat.color}` : "3px solid transparent",
-              }}>
-              <span style={{ fontSize: isMobile ? 14 : 12, fontWeight: 700, color: cat.color }}>{it.name}</span>
-              <span style={{ fontSize: 9, background: it.thread_safe ? "#0d2a1a" : "#2a1a0d", color: it.thread_safe ? "#6bcf7f" : "#e8793a", borderRadius: 3, padding: "1px 4px" }}>
-                {it.thread_safe ? "MT" : "ST"}
-              </span>
-            </div>
-          ))}
-        </div>
-      ))}
-    </>
-  );
+// ─── HEADER ─────────────────────────────────────────────────────────────────
+function header() {
+  const m = state.isMobile;
+  const v = state.view;
+  const inQuiz = v === 'quiz';
 
-  // ── PATTERNS view ──────────────────────────────────────────────────────────
-  const PatternsView = () => (
-    <div style={{ padding: isMobile ? "14px" : "22px", maxWidth: 860, margin: "0 auto" }}>
-      <div style={{ fontSize: 11, color: "#6b7a94", marginBottom: 14 }}>Задача → правильный инструмент</div>
-      <div style={{ display: "grid", gap: 7 }}>
-        {data.patterns.map((p, i) => (
-          <div key={i} style={{
-            background: "#111420", border: "1px solid #1e2330", borderRadius: 9,
-            padding: isMobile ? "11px 13px" : "13px 18px",
-            display: "grid",
-            gridTemplateColumns: isMobile ? "1fr" : "1fr 28px 1fr",
-            gap: isMobile ? 5 : 10, alignItems: "center"
-          }}>
-            <div style={{ fontSize: isMobile ? 12 : 12, color: "#8a9ab5" }}>{p.situation}</div>
-            {!isMobile && <div style={{ color: "#3d4a60", textAlign: "center" }}>→</div>}
-            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-              {isMobile && <span style={{ color: "#3d4a60", fontSize: 12 }}>→</span>}
-              <span style={{ fontSize: isMobile ? 14 : 15, fontWeight: 700, color: "#6bcf7f" }}>{p.solution}</span>
-              <span style={{ fontSize: 10, color: "#6b7a94" }}>{p.note}</span>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-
-  // ── ETYMOLOGY view ─────────────────────────────────────────────────────────
-  const EtymologyView = () => (
-    <div style={{ padding: isMobile ? "14px" : "22px", maxWidth: 1000, margin: "0 auto" }}>
-      <div style={{ fontSize: 11, color: "#6b7a94", marginBottom: 14 }}>Почему типы называются именно так</div>
-      <div style={{ display: "grid", gap: 7 }}>
-        {data.etymology_overview.map((e, idx) => (
-          <div key={idx} style={{
-            background: "#111420", border: "1px solid #1e2330", borderRadius: 9,
-            padding: isMobile ? "11px 13px" : "13px 18px",
-            display: "grid",
-            gridTemplateColumns: isMobile ? "70px 1fr" : "80px 200px 1fr",
-            gap: isMobile ? 10 : 14, alignItems: "start"
-          }}>
-            <div style={{ fontSize: isMobile ? 13 : 14, fontWeight: 800, color: "#e8793a" }}>{e.name}</div>
-            {isMobile ? (
-              <div>
-                <div style={{ fontSize: 11, color: "#4a9eff", marginBottom: 2 }}>{e.full}</div>
-                <div style={{ fontSize: 11, color: "#8a9ab5", lineHeight: 1.5, marginTop: 3 }}>{e.idea}</div>
-                <div style={{ fontSize: 10, color: "#3d4a60", marginTop: 2 }}>{e.origin}</div>
-              </div>
-            ) : (
-              <>
-                <div>
-                  <div style={{ fontSize: 11, color: "#4a9eff", marginBottom: 3 }}>{e.full}</div>
-                  <div style={{ fontSize: 10, color: "#3d4a60" }}>{e.origin}</div>
-                </div>
-                <div style={{ fontSize: 12, color: "#8a9ab5", lineHeight: 1.5 }}>{e.idea}</div>
-              </>
-            )}
-          </div>
-        ))}
-      </div>
-      <div style={{ marginTop: 16, background: "#0a1628", borderLeft: "4px solid #4a9eff", borderRadius: 8, padding: isMobile ? "12px 14px" : "14px 18px", fontSize: 12, color: "#8a9ab5", lineHeight: 1.9 }}>
-        <span style={{ color: "#4a9eff", fontWeight: 700 }}>Паттерн именования в Rust: </span>
-        имена раскрывают механизм реализации, а не абстрактное назначение.{"\n"}
-        Rc = Reference Counted, Arc = Atomic + Rc, RefCell = Ref + Cell, OnceLock = Once + Lock.{"\n"}
-        <span style={{ color: "#f0c040" }}>Совет для собеседования: </span>если знаешь расшифровку — уже понятно как это работает.
-      </div>
-    </div>
-  );
-
-  // ── Item detail view ───────────────────────────────────────────────────────
-  const ItemDetail = () => (
-    <div style={{ padding: isMobile ? "14px" : "20px 24px" }}>
-      <div style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        {!isMobile && (
-          <>
-            <button onClick={() => setActiveItem(null)} style={{ background: "none", border: "none", color: "#4a9eff", cursor: "pointer", fontSize: 11, fontFamily: "inherit", padding: 0 }}>← Все</button>
-            <span style={{ color: "#3d4a60" }}>/</span>
-          </>
-        )}
-        <span style={{ fontSize: isMobile ? 18 : 20, fontWeight: 800, color: category.color }}>{item.name}</span>
-        <span style={{ fontSize: isMobile ? 11 : 12, color: "#6b7a94" }}>{item.subtitle}</span>
-        <span style={{ fontSize: 10, background: item.thread_safe ? "#0d2a1a" : "#2a1a0d", color: item.thread_safe ? "#6bcf7f" : "#e8793a", borderRadius: 5, padding: "3px 9px", marginLeft: "auto" }}>
-          {item.thread_safe ? "✓ Thread-Safe" : "✗ Single Thread"}
-        </span>
-      </div>
-
-      <div style={{ background: "#0a1628", borderLeft: `4px solid ${category.color}`, borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: isMobile ? 13 : 13, color: "#c8d0e0" }}>
-        {item.short}
-      </div>
-
-      {/* Tab buttons — horizontal scroll on mobile */}
-      <div style={{ display: "flex", gap: 5, marginBottom: 14, overflowX: "auto", WebkitOverflowScrolling: "touch", paddingBottom: 2 }}>
-        {Object.entries(tabLabels).map(([key, label]) => (
-          <button key={key} onClick={() => setTab(key)} style={{
-            padding: "5px 10px", borderRadius: 6, border: "1px solid", cursor: "pointer",
-            fontSize: isMobile ? 11 : 11, fontFamily: "inherit", whiteSpace: "nowrap", flexShrink: 0,
-            background: tab === key ? category.color + "20" : "transparent",
-            borderColor: tab === key ? category.color : "#2a3040",
-            color: tab === key ? category.color : "#6b7a94"
-          }}>{label}</button>
-        ))}
-      </div>
-
-      <div style={{ background: "#111420", border: "1px solid #1e2330", borderRadius: 10, padding: isMobile ? "13px 14px" : "16px 20px" }}>
-        {tab === "example" ? (
-          <pre style={{ margin: 0, fontSize: isMobile ? 11 : 12, lineHeight: 1.7, color: "#c8d0e0", overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
-            <code>{item.example}</code>
-          </pre>
-        ) : tab === "interview" ? (
-          <div style={{ display: "grid", gap: 13 }}>
-            {item.interview.map((q, i) => {
-              const sepIdx = q.indexOf("? — ");
-              const question = sepIdx !== -1 ? q.slice(0, sepIdx) : q;
-              const answer = sepIdx !== -1 ? q.slice(sepIdx + 4) : "";
-              return (
-                <div key={i} style={{ borderLeft: "3px solid #c084fc", paddingLeft: 12 }}>
-                  <div style={{ color: "#c084fc", fontWeight: 700, marginBottom: 4, fontSize: isMobile ? 12 : 12 }}>❓ {question}{sepIdx !== -1 ? "?" : ""}</div>
-                  {answer && <div style={{ color: "#8a9ab5", fontSize: isMobile ? 12 : 12, lineHeight: 1.7 }}>{answer}</div>}
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <div style={{ fontSize: isMobile ? 13 : 12, lineHeight: 2, color: "#8a9ab5", whiteSpace: "pre-wrap" }}>
-            {tab === "danger" && <span style={{ color: "#e8793a", marginRight: 6 }}>⚠</span>}
-            {item[tab]}
-          </div>
-        )}
-      </div>
-
-      {/* Related chips */}
-      <div style={{ display: "flex", gap: 7, marginTop: 14, flexWrap: "wrap" }}>
-        {data.categories.flatMap(cat => cat.items).filter(i => i.name !== item.name).slice(0, 6).map(relItem => {
-          const relCat = data.categories.find(c => c.items.some(i => i.name === relItem.name));
-          return (
-            <div key={relItem.name}
-              onClick={() => handleSelectItem(relCat.id, relItem.name)}
-              style={{ background: "#0d0f14", border: "1px solid #1e2330", borderRadius: 6, padding: "6px 11px", cursor: "pointer", fontSize: 11 }}>
-              <span style={{ color: relCat.color, fontWeight: 700 }}>{relItem.name}</span>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-
-  // ── Cards grid ─────────────────────────────────────────────────────────────
-  const CardsGrid = () => (
-    <div style={{
-      padding: isMobile ? "14px" : "20px 24px",
-      display: "grid",
-      gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(auto-fill, minmax(230px, 1fr))",
-      gap: isMobile ? 9 : 11
-    }}>
-      {data.categories.flatMap(cat => cat.items.map(it => (
-        <div key={it.name}
-          onClick={() => handleSelectItem(cat.id, it.name)}
-          style={{ background: "#111420", border: "1px solid #1e2330", borderTop: `3px solid ${cat.color}`, borderRadius: 10, padding: isMobile ? "11px 12px" : "14px 16px", cursor: "pointer" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, flexWrap: "wrap" }}>
-            <span style={{ fontSize: isMobile ? 13 : 15, fontWeight: 800, color: cat.color }}>{it.name}</span>
-            <span style={{ fontSize: 9, background: it.thread_safe ? "#0d2a1a" : "#2a1a0d", color: it.thread_safe ? "#6bcf7f" : "#e8793a", borderRadius: 3, padding: "1px 4px" }}>
-              {it.thread_safe ? "MT" : "ST"}
-            </span>
-          </div>
-          {!isMobile && <div style={{ fontSize: 10, color: "#6b7a94", marginBottom: 4 }}>{it.subtitle}</div>}
-          <div style={{ fontSize: isMobile ? 11 : 11, color: "#8a9ab5", lineHeight: 1.4 }}>{it.short}</div>
-        </div>
-      )))}
-    </div>
-  );
-
-  // ── DESKTOP layout ─────────────────────────────────────────────────────────
-  if (!isMobile) {
-    return (
-      <div style={{ fontFamily: "'JetBrains Mono', 'Fira Code', monospace", background: "#0d0f14", minHeight: "100vh", color: "#c8d0e0" }}>
-        <Header />
-        {view === "patterns" && <PatternsView />}
-        {view === "etymology" && <EtymologyView />}
-        {view === "cards" && (
-          <div style={{ display: "flex", height: "calc(100vh - 55px)" }}>
-            <div style={{ width: 200, borderRight: "1px solid #1e2330", padding: "12px 0", overflowY: "auto", flexShrink: 0 }}>
-              <SidebarContent />
-            </div>
-            <div style={{ flex: 1, overflowY: "auto" }}>
-              {item ? <ItemDetail /> : <CardsGrid />}
-            </div>
-          </div>
-        )}
-      </div>
-    );
+  let leftBtn = '';
+  if (inQuiz) {
+    leftBtn = `<button da="quiz-back" style="${btnBase()};color:#4a9eff;background:none;border:none;font-size:${m?14:13}px">←</button>`;
+  } else if (m && v === 'cards' && state.activeItem) {
+    leftBtn = `<button da="item-back" style="${btnBase()};color:#4a9eff;background:none;border:none;font-size:18px">←</button>`;
+  } else if (m && v === 'cards' && !state.activeItem) {
+    leftBtn = `<button da="sidebar-toggle" style="${btnBase()};color:#4a9eff;background:none;border:none;font-size:18px">☰</button>`;
   }
 
-  // ── MOBILE layout ──────────────────────────────────────────────────────────
-  return (
-    <div style={{ fontFamily: "'JetBrains Mono', 'Fira Code', monospace", background: "#0d0f14", minHeight: "100vh", color: "#c8d0e0", position: "relative" }}>
-      <Header />
+  const navItems = [['cards','Типы'],['patterns','Паттерны'],['etymology','Этимология']];
+  const navBtns = inQuiz ? '' : navItems.map(([id, lbl]) => {
+    const active = v === id;
+    return `<button da="nav" dv="${id}" style="${btnBase()};
+      padding:${m?'4px 7px':'5px 11px'};font-size:${m?10:11}px;
+      background:${active?'#1e2330':'transparent'};
+      border:1px solid ${active?'#4a9eff':'#2a3040'};
+      border-radius:6px;color:${active?'#4a9eff':'#6b7a94'}">${lbl}</button>`;
+  }).join('');
 
-      {/* Drawer overlay */}
-      {sidebarOpen && (
-        <div
-          onClick={() => setSidebarOpen(false)}
-          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 200 }}
-        />
-      )}
+  const quizBtn = inQuiz ? '' : `<button da="nav" dv="quiz" style="${btnBase()};
+    padding:${m?'4px 7px':'5px 11px'};font-size:${m?10:11}px;font-weight:700;
+    background:#0d0a18;border:1px solid #c084fc;border-radius:6px;color:#c084fc">
+    🃏${m?'':' Карточки'}</button>`;
 
-      {/* Drawer panel */}
-      <div style={{
-        position: "fixed", top: 0, left: 0, bottom: 0, width: "78vw", maxWidth: 300,
-        background: "#0d0f14", borderRight: "1px solid #1e2330",
-        zIndex: 300, overflowY: "auto", padding: "16px 0",
-        transform: sidebarOpen ? "translateX(0)" : "translateX(-100%)",
-        transition: "transform 0.22s ease",
-      }}>
-        <div style={{ padding: "0 14px 12px", fontSize: 14, fontWeight: 800, color: "#6b7a94", borderBottom: "1px solid #1e2330", marginBottom: 6 }}>
-          Выбери тип
-        </div>
-        <SidebarContent />
-      </div>
-
-      {/* Main content */}
-      <div style={{ overflowY: "auto" }}>
-        {view === "patterns" && <PatternsView />}
-        {view === "etymology" && <EtymologyView />}
-        {view === "cards" && (
-          item ? <ItemDetail /> : <CardsGrid />
-        )}
-      </div>
+  return `<div style="border-bottom:1px solid #1e2330;padding:${m?'11px 14px':'12px 22px'};
+    display:flex;align-items:center;gap:8px;position:sticky;top:0;z-index:100;background:#0d0f14">
+    ${leftBtn}
+    <div style="font-size:${m?15:18}px;font-weight:800;letter-spacing:-1px">
+      <span style="color:#e8793a">Rust</span><span style="color:#4a9eff">::concurrency</span>
     </div>
-  );
+    <div style="margin-left:auto;display:flex;gap:5px;align-items:center">
+      ${navBtns}${quizBtn}
+    </div>
+  </div>`;
 }
 
+function btnBase() { return 'cursor:pointer;font-family:inherit'; }
 
-const { useState } = React;
-const root = ReactDOM.createRoot(document.getElementById("root"));
-root.render(React.createElement(RustConcurrency));
+// ─── SIDEBAR ────────────────────────────────────────────────────────────────
+function sidebar() {
+  const m = state.isMobile;
+  return data.categories.map(cat => {
+    const rows = cat.items.map(it => {
+      const active = state.activeItem === it.name && state.activeCategory === cat.id;
+      return `<div da="open-item" dc="${cat.id}" di="${esc(it.name)}" style="
+        padding:${m?'10px 14px':'7px 14px'};cursor:pointer;display:flex;align-items:center;gap:7px;
+        background:${active?'#111d2c':'transparent'};
+        border-left:3px solid ${active?cat.color:'transparent'}">
+        <span style="font-size:${m?14:12}px;font-weight:700;color:${cat.color}">${esc(it.name)}</span>
+        <span style="font-size:9px;background:${it.thread_safe?'#0d2a1a':'#2a1a0d'};
+          color:${it.thread_safe?'#6bcf7f':'#e8793a'};border-radius:3px;padding:1px 4px">
+          ${it.thread_safe?'MT':'ST'}</span>
+      </div>`;
+    }).join('');
+    return `<div style="font-size:9px;font-weight:700;color:#3d4a60;
+      padding:7px 14px 3px;letter-spacing:1px;text-transform:uppercase">${esc(cat.label)}</div>${rows}`;
+  }).join('');
+}
+
+function drawer() {
+  const open = state.sidebarOpen;
+  return `
+    <div da="sidebar-close" style="position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;
+      pointer-events:${open?'auto':'none'};opacity:${open?1:0};transition:opacity .2s"></div>
+    <div style="position:fixed;top:0;left:0;bottom:0;width:78vw;max-width:300px;
+      background:#0d0f14;border-right:1px solid #1e2330;z-index:300;overflow-y:auto;padding:16px 0;
+      transform:${open?'translateX(0)':'translateX(-100%)'};transition:transform .22s ease">
+      <div style="padding:0 14px 12px;font-size:13px;font-weight:800;color:#6b7a94;
+        border-bottom:1px solid #1e2330;margin-bottom:6px">Выбери тип</div>
+      ${sidebar()}
+    </div>`;
+}
+
+// ─── PATTERNS ───────────────────────────────────────────────────────────────
+function patterns() {
+  const m = state.isMobile;
+  const rows = data.patterns.map(p => `
+    <div style="background:#111420;border:1px solid #1e2330;border-radius:9px;
+      padding:${m?'10px 12px':'12px 18px'};display:grid;
+      grid-template-columns:${m?'1fr':'1fr 24px 1fr'};gap:${m?4:10}px;align-items:center">
+      <div style="font-size:12px;color:#8a9ab5">${esc(p.situation)}</div>
+      ${m?'':'<div style="color:#3d4a60;text-align:center">→</div>'}
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+        ${m?'<span style="color:#3d4a60;font-size:11px">→</span>':''}
+        <span style="font-size:${m?14:15}px;font-weight:700;color:#6bcf7f">${esc(p.solution)}</span>
+        <span style="font-size:10px;color:#6b7a94">${esc(p.note)}</span>
+      </div>
+    </div>`).join('');
+  return `<div style="padding:${m?'14px':'22px'};max-width:860px;margin:0 auto">
+    <div style="font-size:11px;color:#6b7a94;margin-bottom:14px">Задача → правильный инструмент</div>
+    <div style="display:grid;gap:7px">${rows}</div>
+  </div>`;
+}
+
+// ─── ETYMOLOGY ──────────────────────────────────────────────────────────────
+function etymology() {
+  const m = state.isMobile;
+  const rows = data.etymology_overview.map(e => `
+    <div style="background:#111420;border:1px solid #1e2330;border-radius:9px;
+      padding:${m?'10px 12px':'12px 18px'};display:grid;
+      grid-template-columns:${m?'65px 1fr':'80px 190px 1fr'};gap:${m?8:14}px;align-items:start">
+      <div style="font-size:${m?13:14}px;font-weight:800;color:#e8793a">${esc(e.name)}</div>
+      ${m ? `<div>
+        <div style="font-size:11px;color:#4a9eff;margin-bottom:2px">${esc(e.full)}</div>
+        <div style="font-size:11px;color:#8a9ab5;line-height:1.5;margin-top:3px">${esc(e.idea)}</div>
+        <div style="font-size:10px;color:#3d4a60;margin-top:2px">${esc(e.origin)}</div>
+      </div>` : `
+        <div>
+          <div style="font-size:11px;color:#4a9eff;margin-bottom:2px">${esc(e.full)}</div>
+          <div style="font-size:10px;color:#3d4a60">${esc(e.origin)}</div>
+        </div>
+        <div style="font-size:12px;color:#8a9ab5;line-height:1.5">${esc(e.idea)}</div>`}
+    </div>`).join('');
+  return `<div style="padding:${m?'14px':'22px'};max-width:1000px;margin:0 auto">
+    <div style="font-size:11px;color:#6b7a94;margin-bottom:14px">Почему типы называются именно так</div>
+    <div style="display:grid;gap:7px">${rows}</div>
+    <div style="margin-top:16px;background:#0a1628;border-left:4px solid #4a9eff;border-radius:8px;
+      padding:${m?'12px 14px':'14px 18px'};font-size:12px;color:#8a9ab5;line-height:1.9">
+      <span style="color:#4a9eff;font-weight:700">Паттерн именования в Rust: </span>
+      имена раскрывают механизм реализации, а не абстрактное назначение.<br>
+      Rc = Reference Counted, Arc = Atomic + Rc, RefCell = Ref + Cell, OnceLock = Once + Lock.<br>
+      <span style="color:#f0c040">Совет для собеседования: </span>знаешь расшифровку — уже понятно как это работает.
+    </div>
+  </div>`;
+}
+
+// ─── CARDS GRID ─────────────────────────────────────────────────────────────
+function cardsGrid() {
+  const m = state.isMobile;
+  const cards = data.categories.flatMap(cat =>
+    cat.items.map(it => `
+      <div da="open-item" dc="${cat.id}" di="${esc(it.name)}" style="
+        background:#111420;border:1px solid #1e2330;border-top:3px solid ${cat.color};
+        border-radius:10px;padding:${m?'11px 12px':'14px 16px'};cursor:pointer">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;flex-wrap:wrap">
+          <span style="font-size:${m?13:15}px;font-weight:800;color:${cat.color}">${esc(it.name)}</span>
+          <span style="font-size:9px;background:${it.thread_safe?'#0d2a1a':'#2a1a0d'};
+            color:${it.thread_safe?'#6bcf7f':'#e8793a'};border-radius:3px;padding:1px 4px">
+            ${it.thread_safe?'MT':'ST'}</span>
+        </div>
+        ${m?'':'<div style="font-size:10px;color:#6b7a94;margin-bottom:3px">'+esc(it.subtitle)+'</div>'}
+        <div style="font-size:11px;color:#8a9ab5;line-height:1.4">${esc(it.short)}</div>
+      </div>`)
+  ).join('');
+  return `<div style="padding:${m?'14px':'20px 24px'};display:grid;
+    grid-template-columns:${m?'1fr 1fr':'repeat(auto-fill,minmax(230px,1fr))'};gap:${m?9:11}px">
+    ${cards}</div>`;
+}
+
+// ─── ITEM DETAIL ────────────────────────────────────────────────────────────
+function itemDetail() {
+  const m = state.isMobile;
+  const cat = data.categories.find(c => c.id === state.activeCategory);
+  const item = cat.items.find(i => i.name === state.activeItem);
+
+  const tabBtns = Object.entries(TABS).map(([k, lbl]) => {
+    const active = state.tab === k;
+    return `<button da="set-tab" dv="${k}" style="${btnBase()};
+      padding:5px 10px;border-radius:6px;border:1px solid;
+      font-size:11px;white-space:nowrap;flex-shrink:0;
+      background:${active?cat.color+'28':'transparent'};
+      border-color:${active?cat.color:'#2a3040'};
+      color:${active?cat.color:'#6b7a94'}">${lbl}</button>`;
+  }).join('');
+
+  let body = '';
+  if (state.tab === 'example') {
+    body = `<pre style="margin:0;font-size:${m?11:12}px;line-height:1.7;color:#c8d0e0;overflow-x:auto;white-space:pre"><code>${esc(item.example)}</code></pre>`;
+  } else if (state.tab === 'interview') {
+    body = item.interview.map(q => {
+      const sep = q.indexOf('? — ');
+      const question = sep >= 0 ? q.slice(0,sep)+'?' : q;
+      const answer = sep >= 0 ? q.slice(sep+4) : '';
+      return `<div style="border-left:3px solid #c084fc;padding-left:12px">
+        <div style="color:#c084fc;font-weight:700;margin-bottom:4px;font-size:12px">❓ ${esc(question)}</div>
+        ${answer?`<div style="color:#8a9ab5;font-size:12px;line-height:1.7">${esc(answer)}</div>`:''}
+      </div>`;
+    }).join('');
+    body = `<div style="display:grid;gap:14px">${body}</div>`;
+  } else {
+    const prefix = state.tab==='danger'?'<span style="color:#e8793a;margin-right:6px">⚠</span>':'';
+    body = `<div style="font-size:${m?13:12}px;line-height:2;color:#8a9ab5;white-space:pre-wrap">${prefix}${esc(item[state.tab]||'')}</div>`;
+  }
+
+  const related = data.categories.flatMap(c => c.items.map(i => ({...i, catColor:c.color, catId:c.id})))
+    .filter(i => i.name !== item.name).slice(0,6)
+    .map(r => `<div da="open-item" dc="${r.catId}" di="${esc(r.name)}" style="
+      background:#0d0f14;border:1px solid #1e2330;border-radius:6px;
+      padding:6px 11px;cursor:pointer;font-size:11px">
+      <span style="color:${r.catColor};font-weight:700">${esc(r.name)}</span>
+    </div>`).join('');
+
+  return `<div style="padding:${m?'14px':'20px 24px'}">
+    <div style="margin-bottom:14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      ${!m?`<button da="item-back" style="${btnBase()};background:none;border:none;color:#4a9eff;font-size:11px">← Все</button>
+        <span style="color:#3d4a60">/</span>`:''}
+      <span style="font-size:${m?18:20}px;font-weight:800;color:${cat.color}">${esc(item.name)}</span>
+      <span style="font-size:${m?11:12}px;color:#6b7a94">${esc(item.subtitle)}</span>
+      <span style="font-size:10px;background:${item.thread_safe?'#0d2a1a':'#2a1a0d'};
+        color:${item.thread_safe?'#6bcf7f':'#e8793a'};border-radius:5px;padding:3px 9px;margin-left:auto">
+        ${item.thread_safe?'✓ Thread-Safe':'✗ Single Thread'}</span>
+    </div>
+    <div style="background:#0a1628;border-left:4px solid ${cat.color};border-radius:8px;
+      padding:10px 14px;margin-bottom:14px;font-size:13px;color:#c8d0e0">${esc(item.short)}</div>
+    <div style="display:flex;gap:5px;margin-bottom:14px;overflow-x:auto;padding-bottom:2px">${tabBtns}</div>
+    <div style="background:#111420;border:1px solid #1e2330;border-radius:10px;padding:${m?'13px 14px':'16px 20px'}">${body}</div>
+    <div style="display:flex;gap:7px;margin-top:14px;flex-wrap:wrap">${related}</div>
+  </div>`;
+}
+
+// ─── QUIZ ───────────────────────────────────────────────────────────────────
+function quizSubHeader() {
+  const m = state.isMobile;
+  const q = state.quiz;
+  const extra = q.phase==='playing' ? `
+    <span style="color:#1e2330">|</span>
+    <button da="quiz-setup" style="${btnBase()};background:none;border:none;color:#6b7a94;font-size:12px">настройки</button>
+    <div style="margin-left:auto;display:flex;gap:14px;font-size:12px">
+      <span style="color:#6bcf7f">✓ ${q.knownIds.length}</span>
+      <span style="color:#e8793a">✗ ${q.unknownIds.length}</span>
+    </div>` : '';
+  return `<div style="border-bottom:1px solid #1e2330;padding:${m?'8px 14px':'8px 22px'};
+    display:flex;align-items:center;gap:10px;background:#0d0f14">
+    <button da="quiz-back" style="${btnBase()};background:none;border:none;color:#6b7a94;font-size:12px">← к справочнику</button>
+    ${extra}
+  </div>`;
+}
+
+function quizBody() {
+  const q = state.quiz;
+  if (q.phase === 'setup')   return quizSetup();
+  if (q.phase === 'playing') return quizCard();
+  return quizResults();
+}
+
+function quizSetup() {
+  const m = state.isMobile;
+  const q = state.quiz;
+  const allCatIds = data.categories.map(c => c.id);
+  const allFmtIds = FMTS.map(f => f.id);
+  const selCats = q.selCats || allCatIds;
+  const selFmts = q.selFmts || allFmtIds;
+
+  const catBtns = data.categories.map(cat => {
+    const on = selCats.includes(cat.id);
+    return `<button da="toggle-cat" dv="${cat.id}" style="${btnBase()};
+      padding:7px 12px;border-radius:8px;
+      border:1px solid ${on?cat.color:'#2a3040'};
+      background:${on?cat.color+'18':'transparent'};
+      color:${on?cat.color:'#6b7a94'};font-size:12px;font-weight:600">
+      ${esc(cat.label)} (${cat.items.length})</button>`;
+  }).join('');
+
+  const fmtBtns = FMTS.map(fmt => {
+    const on = selFmts.includes(fmt.id);
+    return `<button da="toggle-fmt" dv="${fmt.id}" style="${btnBase()};
+      padding:7px 11px;border-radius:8px;text-align:left;
+      border:1px solid ${on?'#4a9eff':'#2a3040'};
+      background:${on?'#0a1628':'transparent'};
+      color:${on?'#4a9eff':'#6b7a94'};font-size:11px">
+      ${on?'✓':'○'} ${esc(fmt.label)}</button>`;
+  }).join('');
+
+  const itemCount = data.categories.filter(c => selCats.includes(c.id)).flatMap(c=>c.items).length;
+  const cardCount = itemCount * selFmts.length;
+
+  return `<div style="padding:${m?'16px':'28px'};max-width:680px;margin:0 auto">
+    <div style="font-size:${m?18:22}px;font-weight:800;color:#c8d0e0;margin-bottom:6px">🃏 Режим карточек</div>
+    <div style="font-size:13px;color:#6b7a94;margin-bottom:22px;line-height:1.7">
+      Настрой колоду и тренируй память. Форматы чередуются — каждый тип учится с разных сторон.
+    </div>
+    <div style="margin-bottom:20px">
+      <div style="font-size:11px;color:#6b7a94;margin-bottom:10px;text-transform:uppercase;letter-spacing:1px">
+        Категории
+        <button da="all-cats" style="${btnBase()};margin-left:10px;background:none;border:none;color:#4a9eff;font-size:10px">
+          ${selCats.length===allCatIds.length?'снять все':'выбрать все'}</button>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px">${catBtns}</div>
+    </div>
+    <div style="margin-bottom:24px">
+      <div style="font-size:11px;color:#6b7a94;margin-bottom:10px;text-transform:uppercase;letter-spacing:1px">
+        Типы вопросов
+        <button da="all-fmts" style="${btnBase()};margin-left:10px;background:none;border:none;color:#4a9eff;font-size:10px">
+          ${selFmts.length===allFmtIds.length?'снять все':'выбрать все'}</button>
+      </div>
+      <div style="display:grid;grid-template-columns:${m?'1fr':'1fr 1fr'};gap:7px">${fmtBtns}</div>
+    </div>
+    <div style="background:#111420;border-radius:10px;padding:16px 18px;
+      display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <div>
+        <div style="font-size:24px;font-weight:800;color:#c8d0e0">${cardCount}</div>
+        <div style="font-size:11px;color:#6b7a94">карточек в колоде</div>
+      </div>
+      <div style="font-size:11px;color:#3d4a60;flex:1">${itemCount} типов × ${selFmts.length} форматов</div>
+      <button da="start-quiz" ${cardCount>0?'':'disabled'} style="${btnBase()};
+        padding:12px 24px;border-radius:10px;border:none;
+        background:${cardCount>0?'#4a9eff':'#1e2330'};
+        color:${cardCount>0?'#0d0f14':'#3d4a60'};
+        cursor:${cardCount>0?'pointer':'not-allowed'};
+        font-size:14px;font-weight:800">Начать →</button>
+    </div>
+  </div>`;
+}
+
+// Redact the type name so it doesn't spoil the answer.
+// Handles: exact name, lowercase, compound names starting with base (MutexGuard→Mutex)
+function redact(text, itemName) {
+  if (!text) return text;
+  const base = itemName.replace(/<[^>]*>/, '').trim(); // "Rc<T>" → "Rc"
+  if (!base) return text;
+  const e = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const lower = base.toLowerCase();
+  const el = lower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  let result = text;
+  // 1. Exact base: as standalone word OR before :: < uppercase-continuation
+  //    e.g. "Rc", "Rc::new", "Rc<T>", "RcWeak" but NOT inside "Arc"
+  result = result.replace(new RegExp('(?<![A-Za-z])' + e + '(?=[^a-z]|$)', 'g'), '░░░');
+  // 2. Lowercase as variable name after & or let/mut keyword
+  result = result.replace(new RegExp('(&|\\blet mut\\s+|\\blet\\s+)' + el + '\\b', 'g'), '$1░░░');
+  return result;
+}
+
+function quizCard() {
+  const m = state.isMobile;
+  const q = state.quiz;
+  const card = q.deck[q.index];
+  const {item, fmt, flipped} = card;
+  const front = fmt.front(item);
+  const back  = fmt.back(item);
+  const pct = (q.index / q.deck.length) * 100;
+
+  // If the answer is the type name, censor it from the question text
+  const answerIsName = back.v === item.name;
+  const frontText = answerIsName ? redact(front.v, item.name) : front.v;
+  return `<div style="padding:${m?'14px':'28px'};max-width:600px;margin:0 auto;display:flex;flex-direction:column;gap:14px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <div style="flex:1;height:3px;background:#1e2330;border-radius:2px;overflow:hidden">
+        <div style="height:100%;background:#4a9eff;width:${pct}%;transition:width 0.3s"></div>
+      </div>
+      <span style="font-size:11px;color:#6b7a94;flex-shrink:0">${q.index+1} / ${q.deck.length}</span>
+    </div>
+
+    <div da="flip-card" style="
+      background:#111420;border:1px solid #2a3040;border-radius:14px;
+      padding:${m?'18px 16px':'26px 30px'};min-height:${m?200:260}px;
+      display:flex;flex-direction:column;cursor:pointer;user-select:none;
+      -webkit-tap-highlight-color:transparent">
+
+      <!-- FRONT: question -->
+      <div>
+        <div style="font-size:10px;color:#6b7a94;margin-bottom:8px;
+          text-transform:uppercase;letter-spacing:0.5px">${esc(front.q)}</div>
+        <div style="font-size:${m?15:18}px;font-weight:700;color:#c8d0e0;line-height:1.5">${esc(frontText)}</div>
+      </div>
+
+      ${flipped ? `
+        <!-- BACK: answer revealed -->
+        <div style="border-top:1px solid #1e2330;padding-top:16px;margin-top:16px">
+          <div style="font-size:10px;color:#6bcf7f;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">
+            ✓ ${esc(back.q)}</div>
+          <div style="font-size:${m?15:16}px;font-weight:700;color:#6bcf7f;line-height:1.5">${esc(back.v)}</div>
+          ${back.hint?`<div style="font-size:11px;color:#4a9eff;margin-top:6px">${esc(back.hint)}</div>`:''}
+          <div style="font-size:11px;color:#6b7a94;margin-top:10px">${esc(item.short)}</div>
+        </div>` :
+        `<div style="margin-top:auto;text-align:center;font-size:12px;color:#2a3040;padding-top:16px">
+          нажми чтобы увидеть ответ</div>`}
+    </div>
+
+    <div style="display:flex;gap:10px">
+      <button da="dont-know" style="${btnBase()};flex:1;padding:${m?13:14}px;border-radius:10px;
+        border:1px solid #e8793a44;background:#1a100a;color:#e8793a;
+        font-size:${m?13:14}px;font-weight:600">✗ Не знаю</button>
+      <button da="do-know" ${flipped?'':'disabled'} style="${btnBase()};flex:1;padding:${m?13:14}px;border-radius:10px;
+        border:1px solid #6bcf7f44;
+        background:${flipped?'#0a1a0e':'#0d0f14'};
+        color:${flipped?'#6bcf7f':'#2a3040'};
+        cursor:${flipped?'pointer':'not-allowed'};
+        font-size:${m?13:14}px;font-weight:600">✓ Знаю</button>
+    </div>
+    <div style="font-size:10px;color:#2a3040;text-align:center">«Знаю» доступно только после просмотра ответа</div>
+  </div>`;
+}
+
+function quizResults() {
+  const m = state.isMobile;
+  const q = state.quiz;
+  const known = q.knownIds.length, unknown = q.unknownIds.length, total = q.deck.length;
+  const pct = Math.round((known/total)*100);
+  const emoji = pct===100?'🎉':pct>=70?'💪':pct>=40?'📚':'🔁';
+  const msg = pct===100?'Отлично!':pct>=70?'Хороший результат':pct>=40?'Есть над чем работать':'Продолжай учиться';
+  return `<div style="padding:${m?'20px 16px':'40px'};max-width:500px;margin:0 auto;text-align:center">
+    <div style="font-size:${m?40:52}px;margin-bottom:8px">${emoji}</div>
+    <div style="font-size:${m?22:28}px;font-weight:800;color:#c8d0e0;margin-bottom:6px">${msg}</div>
+    <div style="font-size:14px;color:#6b7a94;margin-bottom:24px">${known} из ${total} карточек</div>
+    <div style="background:#111420;border-radius:12px;padding:18px 20px;margin-bottom:20px;text-align:left">
+      <div style="display:flex;justify-content:space-between;margin-bottom:10px">
+        <span style="font-size:13px;color:#6bcf7f">✓ Знаю — ${known}</span>
+        <span style="font-size:13px;color:#e8793a">✗ Не знаю — ${unknown}</span>
+      </div>
+      <div style="height:8px;background:#1e2330;border-radius:4px;overflow:hidden">
+        <div style="height:100%;background:linear-gradient(90deg,#6bcf7f,#4a9eff);width:${pct}%"></div>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      ${unknown>0?`<button da="restart-unknown" style="${btnBase()};padding:13px;border-radius:10px;
+        border:1px solid #4a9eff44;background:#0a1628;color:#4a9eff;font-size:14px;font-weight:600">
+        🔁 Повторить незнакомые (${unknown})</button>`:''}
+      <button da="restart-all" style="${btnBase()};padding:13px;border-radius:10px;
+        border:1px solid #2a3040;background:#111420;color:#8a9ab5;font-size:14px;font-weight:600">
+        Начать заново (все ${total})</button>
+      <button da="quiz-setup" style="${btnBase()};padding:13px;border-radius:10px;
+        border:1px solid #2a3040;background:transparent;color:#6b7a94;font-size:14px">
+        ⚙ Настроить колоду</button>
+    </div>
+  </div>`;
+}
+
+// ─── EVENTS — single persistent delegated listener ──────────────────────────
+document.addEventListener('click', function(e) {
+  // Walk up DOM tree from click target, find first element with 'da' attribute
+  let el = e.target;
+  while (el && el.tagName !== 'HTML') {
+    const action = el.getAttribute('da');
+    if (action) {
+      e.stopPropagation();
+      handle(action, el, e);
+      return;
+    }
+    el = el.parentElement;
+  }
+});
+
+function handle(action, el, e) {
+  const q = state.quiz;
+  const allCatIds = data.categories.map(c => c.id);
+  const allFmtIds = FMTS.map(f => f.id);
+  const selCats = () => q.selCats || allCatIds;
+  const selFmts = () => q.selFmts || allFmtIds;
+
+  switch(action) {
+    case 'nav': {
+      const v = el.getAttribute('dv');
+      // init quiz defaults when entering quiz first time
+      if (v === 'quiz' && !q.selCats) setQ({ selCats: allCatIds, selFmts: allFmtIds, phase: 'setup' });
+      set({ view: v, activeItem: null, sidebarOpen: false });
+      break;
+    }
+    case 'quiz-back':
+      set({ view: 'cards', activeItem: null, sidebarOpen: false });
+      break;
+    case 'item-back':
+      set({ activeItem: null });
+      break;
+    case 'sidebar-toggle':
+      set({ sidebarOpen: !state.sidebarOpen });
+      break;
+    case 'sidebar-close':
+      set({ sidebarOpen: false });
+      break;
+    case 'open-item':
+      set({ activeCategory: el.getAttribute('dc'), activeItem: el.getAttribute('di'), tab:'what', sidebarOpen:false });
+      break;
+    case 'set-tab':
+      set({ tab: el.getAttribute('dv') });
+      break;
+
+    case 'toggle-cat': {
+      const id = el.getAttribute('dv');
+      const cur = selCats();
+      setQ({ selCats: cur.includes(id) ? cur.filter(x=>x!==id) : [...cur,id] });
+      break;
+    }
+    case 'toggle-fmt': {
+      const id = el.getAttribute('dv');
+      const cur = selFmts();
+      setQ({ selFmts: cur.includes(id) ? cur.filter(x=>x!==id) : [...cur,id] });
+      break;
+    }
+    case 'all-cats':
+      setQ({ selCats: selCats().length===allCatIds.length ? [] : allCatIds });
+      break;
+    case 'all-fmts':
+      setQ({ selFmts: selFmts().length===allFmtIds.length ? [] : allFmtIds });
+      break;
+    case 'start-quiz': {
+      const deck = buildDeck(selCats(), selFmts());
+      setQ({ phase:'playing', deck, index:0, knownIds:[], unknownIds:[] });
+      break;
+    }
+    case 'flip-card': {
+      // Mark current card as flipped (mutate deck array item)
+      const deck = q.deck.map((c,i) => i===q.index ? {...c, flipped:true} : c);
+      setQ({ deck });
+      break;
+    }
+    case 'do-know': {
+      if (!q.deck[q.index].flipped) return; // guard: must flip first
+      const knownIds = [...q.knownIds, q.deck[q.index].id];
+      const next = q.index + 1;
+      setQ(next >= q.deck.length ? { knownIds, phase:'results' } : { knownIds, index:next });
+      break;
+    }
+    case 'dont-know': {
+      const unknownIds = [...q.unknownIds, q.deck[q.index].id];
+      const next = q.index + 1;
+      setQ(next >= q.deck.length ? { unknownIds, phase:'results' } : { unknownIds, index:next });
+      break;
+    }
+    case 'restart-all': {
+      const deck = shuffle(q.deck.map(c=>({...c,flipped:false})));
+      setQ({ phase:'playing', deck, index:0, knownIds:[], unknownIds:[] });
+      break;
+    }
+    case 'restart-unknown': {
+      const deck = shuffle(q.deck.filter(c=>q.unknownIds.includes(c.id)).map(c=>({...c,flipped:false})));
+      setQ({ phase:'playing', deck, index:0, knownIds:[], unknownIds:[] });
+      break;
+    }
+    case 'quiz-setup':
+      setQ({ phase:'setup' });
+      break;
+  }
+}
+
+render();
 
   </script>
 </body>
